@@ -1,0 +1,15 @@
+model = "company-coder-model"
+model_provider = "company-model"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[model_providers.company-model]
+name = "Company Model"
+base_url = "http://model-gateway.internal:8000/v1"
+env_key = "COMPANY_MODEL_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+request_max_retries = 2
+stream_max_retries = 2
+stream_idle_timeout_ms = 300000
+

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p /workspace/repository /results
+
+repository_url="$(cat /job/repository-url.txt)"
+repository_ref="$(cat /job/repository-ref.txt)"
+
+git clone \
+  --branch "${repository_ref}" \
+  --single-branch \
+  "${repository_url}" \
+  /workspace/repository
+
+cd /workspace/repository
+set +e
+
+codex exec \
+  --ephemeral \
+  --json \
+  --sandbox workspace-write \
+  --ask-for-approval never \
+  --output-last-message /results/final-message.md \
+  - < /job/prompt.txt \
+  > /results/codex-events.jsonl \
+  2> /results/codex-stderr.log
+
+codex_exit_code=$?
+
+git status --porcelain=v1 > /results/git-status.txt
+git diff --binary > /results/changes.diff
+printf '%s' "${codex_exit_code}" > /results/exit-code.txt
+
+exit "${codex_exit_code}"
+

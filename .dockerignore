@@ -1,0 +1,9 @@
+.git
+.github
+.env
+data
+**/__pycache__
+**/*.pyc
+vendor/codex/target
+vendor/codex/codex-rs/target
+
