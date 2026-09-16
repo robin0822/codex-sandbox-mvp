@@ -1,7 +1,8 @@
 model = "company-coder-model"
 model_provider = "company-model"
 approval_policy = "never"
-sandbox_mode = "workspace-write"
+# The disposable Runner container is the isolation boundary.
+sandbox_mode = "danger-full-access"
 
 [model_providers.company-model]
 name = "Company Model"

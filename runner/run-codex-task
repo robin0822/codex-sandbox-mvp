@@ -15,11 +15,12 @@ git clone \
 cd /workspace/repository
 set +e
 
+# Each task already runs inside its own Docker container. Nested bubblewrap
+# namespaces fail under the default Docker seccomp profile.
 codex exec \
   --ephemeral \
   --json \
-  --sandbox workspace-write \
-  --ask-for-approval never \
+  --sandbox "${CODEX_SANDBOX_MODE:-danger-full-access}" \
   --output-last-message /results/final-message.md \
   - < /job/prompt.txt \
   > /results/codex-events.jsonl \
