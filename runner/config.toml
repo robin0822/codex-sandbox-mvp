@@ -1,13 +1,13 @@
-model = "company-coder-model"
-model_provider = "company-model"
+model = "xopglm53"
+model_provider = "xf-responses"
 approval_policy = "never"
 # The disposable Runner container is the isolation boundary.
 sandbox_mode = "danger-full-access"
 
-[model_providers.company-model]
-name = "Company Model"
-base_url = "http://model-gateway.internal:8000/v1"
-env_key = "COMPANY_MODEL_API_KEY"
+[model_providers.xf-responses]
+name = "XF Responses"
+base_url = "https://maas-api.cn-huabei-1.xf-yun.com/v1"
+env_key = "MODEL_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
 request_max_retries = 2
