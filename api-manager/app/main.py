@@ -1,10 +1,138 @@
+import json
 import os
+import re
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import docker
-from fastapi import FastAPI
+from docker.errors import DockerException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, status
+from pydantic import BaseModel, Field, field_validator
 
 
-app = FastAPI(title="Codex Sandbox MVP", version="0.1.0")
+app = FastAPI(title="Codex Sandbox MVP", version="0.2.0")
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+HOST_DATA_DIR = Path(os.environ.get("HOST_DATA_DIR", "/data/codex-mvp"))
+TASK_DIR = DATA_DIR / "tasks"
+RESULT_DIR = DATA_DIR / "results"
+MAX_ACTIVE_TASKS = int(os.environ.get("MAX_ACTIVE_TASKS", "1"))
+RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "")
+TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "180"))
+_lock = threading.Lock()
+
+
+class Repository(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+    ref: str = Field(default="main", min_length=1, max_length=200)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("repository.url must be an HTTPS URL without embedded credentials")
+        return value
+
+    @field_validator("ref")
+    @classmethod
+    def validate_ref(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_./-]+", value) or ".." in value or value.startswith("-"):
+            raise ValueError("repository.ref contains invalid characters")
+        return value
+
+
+class TaskRequest(BaseModel):
+    repository: Repository
+    prompt: str = Field(min_length=1, max_length=20000)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _task_file(task_id: str) -> Path:
+    return TASK_DIR / task_id / "task.json"
+
+
+def _read_task(task_id: str) -> dict:
+    path = _task_file(task_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="task not found")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_task(task: dict) -> None:
+    path = _task_file(task["task_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(task, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _active_count() -> int:
+    return sum(
+        json.loads(path.read_text(encoding="utf-8"))["status"] in {"starting", "running"}
+        for path in TASK_DIR.glob("*/task.json")
+    )
+
+
+def _run_task(task_id: str) -> None:
+    container = None
+    task = _read_task(task_id)
+    try:
+        client = docker.from_env()
+        container = client.containers.run(
+            RUNNER_IMAGE,
+            detach=True,
+            name=f"codex-task-{task_id}",
+            entrypoint="/usr/local/bin/run-codex-task",
+            environment={"MODEL_API_KEY": os.environ["MODEL_API_KEY"]},
+            volumes={
+                str(HOST_DATA_DIR / "tasks" / task_id / "job"): {"bind": "/job", "mode": "ro"},
+                str(HOST_DATA_DIR / "results" / task_id): {"bind": "/results", "mode": "rw"},
+            },
+            labels={"codex.mvp.managed": "true", "codex.mvp.task_id": task_id},
+            mem_limit="2g",
+            nano_cpus=1_000_000_000,
+            pids_limit=256,
+            security_opt=["no-new-privileges:true"],
+        )
+        task["status"] = "running"
+        task["started_at"] = _now()
+        _write_task(task)
+        deadline = time.monotonic() + TASK_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            container.reload()
+            if container.status == "exited":
+                break
+            time.sleep(1)
+        else:
+            container.kill()
+            task["status"] = "timed_out"
+        if task["status"] != "timed_out":
+            exit_file = RESULT_DIR / task_id / "exit-code.txt"
+            task["status"] = "succeeded" if exit_file.is_file() and exit_file.read_text().strip() == "0" else "failed"
+    except (DockerException, OSError, KeyError) as exc:
+        task["status"] = "failed"
+        task["error"] = type(exc).__name__
+    finally:
+        if container is not None:
+            try:
+                (RESULT_DIR / task_id / "runner.log").write_bytes(
+                    container.logs(stdout=True, stderr=True, tail=200)
+                )
+            except DockerException:
+                pass
+            try:
+                container.remove(force=True)
+            except DockerException as exc:
+                task["cleanup_error"] = type(exc).__name__
+        task["finished_at"] = _now()
+        _write_task(task)
 
 
 @app.get("/health/live")
@@ -14,19 +142,49 @@ async def health_live() -> dict[str, str]:
 
 @app.get("/health/ready")
 async def health_ready() -> dict[str, str]:
-    client = docker.from_env()
-    client.ping()
-    image = os.environ.get("RUNNER_IMAGE", "")
-    if image:
-        client.images.get(image)
+    if not RUNNER_IMAGE or not os.environ.get("MODEL_API_KEY"):
+        raise HTTPException(status_code=503, detail="Runner image or model key is missing")
+    try:
+        client = docker.from_env()
+        client.ping()
+        client.images.get(RUNNER_IMAGE)
+    except DockerException as exc:
+        raise HTTPException(status_code=503, detail=type(exc).__name__) from exc
     return {"status": "ready"}
 
 
 @app.get("/v1/capacity")
 async def capacity() -> dict[str, int]:
     return {
-        "max_active_tasks": int(os.environ.get("MAX_ACTIVE_TASKS", "1")),
-        "running_tasks": 0,
+        "max_active_tasks": MAX_ACTIVE_TASKS,
+        "running_tasks": _active_count(),
         "queued_tasks": 0,
     }
 
+
+@app.post("/v1/tasks", status_code=status.HTTP_202_ACCEPTED)
+async def create_task(request: TaskRequest, background_tasks: BackgroundTasks) -> dict:
+    if not RUNNER_IMAGE or not os.environ.get("MODEL_API_KEY"):
+        raise HTTPException(status_code=503, detail="Runner image or model key is missing")
+    with _lock:
+        if _active_count() >= MAX_ACTIVE_TASKS:
+            raise HTTPException(status_code=429, detail="Runner capacity is full")
+        task_id = uuid.uuid4().hex
+        job_dir = TASK_DIR / task_id / "job"
+        job_dir.mkdir(parents=True)
+        (job_dir / "repository-url.txt").write_text(request.repository.url, encoding="utf-8")
+        (job_dir / "repository-ref.txt").write_text(request.repository.ref, encoding="utf-8")
+        (job_dir / "prompt.txt").write_text(request.prompt, encoding="utf-8")
+        results = RESULT_DIR / task_id
+        results.mkdir(parents=True)
+        os.chown(results, 10001, 10001)
+        _write_task({"task_id": task_id, "status": "starting", "created_at": _now()})
+    background_tasks.add_task(_run_task, task_id)
+    return {"task_id": task_id, "status": "starting", "links": {"self": f"/v1/tasks/{task_id}"}}
+
+
+@app.get("/v1/tasks/{task_id}")
+async def get_task(task_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
+        raise HTTPException(status_code=404, detail="task not found")
+    return _read_task(task_id)

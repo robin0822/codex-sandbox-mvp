@@ -30,7 +30,17 @@ curl http://127.0.0.1:18080/health/live
 curl http://127.0.0.1:18080/health/ready
 ```
 
-当前提交先完成镜像构建、运行环境和健康检查。任务 API、SSE 和容器生命周期实现将在后续提交中加入。
+API Manager 现已支持最小任务接口：`POST /v1/tasks` 接收 HTTPS 仓库、分支和 Prompt，创建一次性 Runner；`GET /v1/tasks/{task_id}` 查询状态；`GET /v1/capacity` 查看单机并发。Runner 完成或超时后由 Manager 删除，结果文件暂存于 `/data/codex-mvp/results/{task_id}`。SSE 和结果下载接口将在后续步骤实现。
+
+实验请求示例：
+
+```bash
+curl -sS http://127.0.0.1:18080/v1/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"repository":{"url":"https://github.com/octocat/Hello-World.git","ref":"master"},"prompt":"在 README 中增加一行 RUNNER_TEST_OK"}'
+```
+
+收到 `202` 和 `task_id` 后，调用 `GET /v1/tasks/{task_id}` 查询状态。Manager 端口仅绑定服务器回环地址。本阶段任务状态由本机文件保存，Manager 在运行中重启时尚无任务恢复机制。
 
 Runner 已在 ARM64 服务器上通过一次性容器完成源码执行验证：克隆临时 Git 仓库、调用 Codex 修改 `README.md`、导出 JSONL 事件和 diff，然后自动删除容器。Runner 使用 Docker 容器作为隔离边界，容器内不再启动嵌套的 bubblewrap 沙箱。
 
@@ -50,4 +60,3 @@ API Manager
 ## Codex
 
 上游项目：<https://github.com/openai/codex>
-
