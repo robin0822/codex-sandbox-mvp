@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -10,11 +11,12 @@ from urllib.parse import urlsplit
 
 import docker
 from docker.errors import DockerException
-from fastapi import BackgroundTasks, FastAPI, HTTPException, status
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
+from starlette.responses import StreamingResponse
 
 
-app = FastAPI(title="Codex Sandbox MVP", version="0.2.0")
+app = FastAPI(title="Codex Sandbox MVP", version="0.3.0")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.environ.get("HOST_DATA_DIR", "/data/codex-mvp"))
 TASK_DIR = DATA_DIR / "tasks"
@@ -22,6 +24,8 @@ RESULT_DIR = DATA_DIR / "results"
 MAX_ACTIVE_TASKS = int(os.environ.get("MAX_ACTIVE_TASKS", "1"))
 RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "")
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "180"))
+SSE_POLL_SECONDS = 0.25
+SSE_HEARTBEAT_SECONDS = 15
 _lock = threading.Lock()
 
 
@@ -78,6 +82,67 @@ def _active_count() -> int:
         json.loads(path.read_text(encoding="utf-8"))["status"] in {"starting", "running"}
         for path in TASK_DIR.glob("*/task.json")
     )
+
+
+def _sse_event(task_id: str, sequence: int, event_type: str, data: dict) -> str:
+    envelope = {
+        "task_id": task_id,
+        "sequence": sequence,
+        "timestamp": _now(),
+        "type": event_type,
+        "data": data,
+    }
+    payload = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+    return f"id: {sequence}\nevent: {event_type}\ndata: {payload}\n\n"
+
+
+async def _stream_task_events(task_id: str, after_sequence: int):
+    events_path = RESULT_DIR / task_id / "codex-events.jsonl"
+    offset = 0
+    pending = b""
+    sequence = 0
+    last_heartbeat = time.monotonic()
+
+    while True:
+        if events_path.is_file():
+            with events_path.open("rb") as events_file:
+                events_file.seek(offset)
+                chunk = events_file.read()
+                offset = events_file.tell()
+            pending += chunk
+            lines = pending.split(b"\n")
+            pending = lines.pop()
+            for line in lines:
+                if not line:
+                    continue
+                sequence += 1
+                if sequence > after_sequence:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        event = {"raw": line.decode("utf-8", errors="replace")}
+                    yield _sse_event(task_id, sequence, "codex.event", event)
+
+        task = _read_task(task_id)
+        if task["status"] in {"succeeded", "failed", "timed_out"}:
+            if pending.strip():
+                sequence += 1
+                if sequence > after_sequence:
+                    try:
+                        event = json.loads(pending)
+                    except json.JSONDecodeError:
+                        event = {"raw": pending.decode("utf-8", errors="replace")}
+                    yield _sse_event(task_id, sequence, "codex.event", event)
+            sequence += 1
+            if sequence > after_sequence:
+                event_type = "task.completed" if task["status"] == "succeeded" else "task.failed"
+                yield _sse_event(task_id, sequence, event_type, {"status": task["status"]})
+            return
+
+        if time.monotonic() - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
+            yield ": heartbeat\n\n"
+            last_heartbeat = time.monotonic()
+        await asyncio.sleep(SSE_POLL_SECONDS)
 
 
 def _run_task(task_id: str) -> None:
@@ -180,7 +245,14 @@ async def create_task(request: TaskRequest, background_tasks: BackgroundTasks) -
         os.chown(results, 10001, 10001)
         _write_task({"task_id": task_id, "status": "starting", "created_at": _now()})
     background_tasks.add_task(_run_task, task_id)
-    return {"task_id": task_id, "status": "starting", "links": {"self": f"/v1/tasks/{task_id}"}}
+    return {
+        "task_id": task_id,
+        "status": "starting",
+        "links": {
+            "self": f"/v1/tasks/{task_id}",
+            "events": f"/v1/tasks/{task_id}/events",
+        },
+    }
 
 
 @app.get("/v1/tasks/{task_id}")
@@ -188,3 +260,18 @@ async def get_task(task_id: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{32}", task_id):
         raise HTTPException(status_code=404, detail="task not found")
     return _read_task(task_id)
+
+
+@app.get("/v1/tasks/{task_id}/events")
+async def get_task_events(task_id: str, request: Request) -> StreamingResponse:
+    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
+        raise HTTPException(status_code=404, detail="task not found")
+    _read_task(task_id)
+    last_event_id = request.headers.get("last-event-id", "0")
+    if not last_event_id.isdecimal():
+        raise HTTPException(status_code=400, detail="Last-Event-ID must be a nonnegative integer")
+    return StreamingResponse(
+        _stream_task_events(task_id, int(last_event_id)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -96,6 +97,69 @@ class TaskLifecycleTest(unittest.TestCase):
             json={"repository": {"url": "https://example.com/repo.git"}, "prompt": "test"},
         )
         self.assertEqual(response.status_code, 429)
+
+    def test_sse_replays_events_and_resumes_after_last_event_id(self):
+        task_id = "b" * 32
+        task_dir = self.root / "tasks" / task_id
+        result_dir = self.root / "results" / task_id
+        task_dir.mkdir(parents=True)
+        result_dir.mkdir(parents=True)
+        (task_dir / "task.json").write_text(
+            json.dumps({"task_id": task_id, "status": "succeeded"})
+        )
+        (result_dir / "codex-events.jsonl").write_text(
+            '{"type":"thread.started"}\n{"type":"turn.completed"}\n'
+        )
+
+        response = self.client.get(f"/v1/tasks/{task_id}/events")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
+        self.assertIn("id: 1\nevent: codex.event", response.text)
+        self.assertIn("id: 2\nevent: codex.event", response.text)
+        self.assertIn("id: 3\nevent: task.completed", response.text)
+
+        resumed = self.client.get(
+            f"/v1/tasks/{task_id}/events", headers={"Last-Event-ID": "1"}
+        )
+        self.assertNotIn("id: 1\n", resumed.text)
+        self.assertIn("id: 2\nevent: codex.event", resumed.text)
+        self.assertIn("id: 3\nevent: task.completed", resumed.text)
+        invalid = self.client.get(
+            f"/v1/tasks/{task_id}/events", headers={"Last-Event-ID": "abc"}
+        )
+        self.assertEqual(invalid.status_code, 400)
+
+    def test_sse_follows_new_lines_without_emitting_partial_json(self):
+        task_id = "c" * 32
+        task_dir = self.root / "tasks" / task_id
+        result_dir = self.root / "results" / task_id
+        task_dir.mkdir(parents=True)
+        result_dir.mkdir(parents=True)
+        task_file = task_dir / "task.json"
+        task_file.write_text(json.dumps({"task_id": task_id, "status": "running"}))
+        events_file = result_dir / "codex-events.jsonl"
+        events_file.write_bytes(b'{"type":"thread.started"}\n')
+
+        async def consume():
+            stream = main._stream_task_events(task_id, 0)
+            first = await asyncio.wait_for(anext(stream), 1)
+            with events_file.open("ab") as output:
+                output.write(b'{"type":"turn.')
+            second_pending = asyncio.create_task(anext(stream))
+            await asyncio.sleep(0.03)
+            self.assertFalse(second_pending.done())
+            with events_file.open("ab") as output:
+                output.write(b'completed"}\n')
+            task_file.write_text(json.dumps({"task_id": task_id, "status": "succeeded"}))
+            second = await asyncio.wait_for(second_pending, 1)
+            terminal = await asyncio.wait_for(anext(stream), 1)
+            return first, second, terminal
+
+        with patch.object(main, "SSE_POLL_SECONDS", 0.005):
+            first, second, terminal = asyncio.run(consume())
+        self.assertIn("id: 1\nevent: codex.event", first)
+        self.assertIn("id: 2\nevent: codex.event", second)
+        self.assertIn("id: 3\nevent: task.completed", terminal)
 
 
 if __name__ == "__main__":

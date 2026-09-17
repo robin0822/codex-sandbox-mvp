@@ -30,7 +30,7 @@ curl http://127.0.0.1:18080/health/live
 curl http://127.0.0.1:18080/health/ready
 ```
 
-API Manager 现已支持最小任务接口：`POST /v1/tasks` 接收 HTTPS 仓库、分支和 Prompt，创建一次性 Runner；`GET /v1/tasks/{task_id}` 查询状态；`GET /v1/capacity` 查看单机并发。Runner 完成或超时后由 Manager 删除，结果文件暂存于 `/data/codex-mvp/results/{task_id}`。SSE 和结果下载接口将在后续步骤实现。
+API Manager 现已支持最小任务接口：`POST /v1/tasks` 接收 HTTPS 仓库、分支和 Prompt，创建一次性 Runner；`GET /v1/tasks/{task_id}` 查询状态；`GET /v1/tasks/{task_id}/events` 实时推送 Codex 事件；`GET /v1/capacity` 查看单机并发。Runner 完成或超时后由 Manager 删除，结果文件暂存于 `/data/codex-mvp/results/{task_id}`。结果下载接口将在下一步实现。
 
 实验请求示例：
 
@@ -40,7 +40,14 @@ curl -sS http://127.0.0.1:18080/v1/tasks \
   -d '{"repository":{"url":"https://github.com/octocat/Hello-World.git","ref":"master"},"prompt":"在 README 中增加一行 RUNNER_TEST_OK"}'
 ```
 
-收到 `202` 和 `task_id` 后，调用 `GET /v1/tasks/{task_id}` 查询状态。Manager 端口仅绑定服务器回环地址。本阶段任务状态由本机文件保存，Manager 在运行中重启时尚无任务恢复机制。
+收到 `202` 和 `task_id` 后，使用返回的 `links.events` 连接 SSE：
+
+```bash
+curl -N -H 'Accept: text/event-stream' \
+  http://127.0.0.1:18080/v1/tasks/<task_id>/events
+```
+
+事件包含递增的 `id`、`event` 和 JSON `data`；断线后把最后收到的数字 `id` 放入 `Last-Event-ID` 请求头即可续读。空闲时每 15 秒发送 heartbeat，任务结束时发送 `task.completed` 或 `task.failed` 并关闭流。Manager 端口仅绑定服务器回环地址。本阶段任务状态由本机文件保存，Manager 在运行中重启时尚无任务恢复机制。
 
 Runner 已在 ARM64 服务器上通过一次性容器完成源码执行验证：克隆临时 Git 仓库、调用 Codex 修改 `README.md`、导出 JSONL 事件和 diff，然后自动删除容器。Runner 使用 Docker 容器作为隔离边界，容器内不再启动嵌套的 bubblewrap 沙箱。
 
@@ -53,8 +60,8 @@ API Manager
 -> Docker Engine创建Runner
 -> Runner执行codex exec --json
 -> API Manager转发事件
--> 导出结果
--> 删除Runner和工作Volume
+-> 结果写入宿主机任务目录
+-> 删除Runner容器及其内部工作目录
 ```
 
 ## Codex
