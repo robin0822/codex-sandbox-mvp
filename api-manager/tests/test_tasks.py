@@ -161,6 +161,59 @@ class TaskLifecycleTest(unittest.TestCase):
         self.assertIn("id: 2\nevent: codex.event", second)
         self.assertIn("id: 3\nevent: task.completed", terminal)
 
+    def test_result_waits_for_completion_then_returns_outputs(self):
+        task_id = "e" * 32
+        task_dir = self.root / "tasks" / task_id
+        result_dir = self.root / "results" / task_id
+        task_dir.mkdir(parents=True)
+        result_dir.mkdir(parents=True)
+        task_file = task_dir / "task.json"
+        task_file.write_text(json.dumps({"task_id": task_id, "status": "running"}))
+        pending = self.client.get(f"/v1/tasks/{task_id}/result")
+        self.assertEqual(pending.status_code, 202)
+        self.assertEqual(pending.headers["retry-after"], "2")
+        self.assertEqual(
+            self.client.get(f"/v1/tasks/{task_id}/artifacts/changes.diff").status_code,
+            409,
+        )
+
+        task_file.write_text(json.dumps({"task_id": task_id, "status": "succeeded"}))
+        (result_dir / "exit-code.txt").write_text("0")
+        (result_dir / "final-message.md").write_text("Done")
+        (result_dir / "git-status.txt").write_text(" M README.md\n")
+        (result_dir / "changes.diff").write_text("+MVP_OK\n")
+        (result_dir / "codex-events.jsonl").write_text('{"type":"turn.completed"}\n')
+        response = self.client.get(f"/v1/tasks/{task_id}/result")
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["final_message"], "Done")
+        self.assertEqual(result["diff"], "+MVP_OK\n")
+        self.assertEqual(len(result["artifacts"]), 2)
+        self.assertEqual(
+            self.client.get(f"/v1/tasks/{task_id}/artifacts/changes.diff").text,
+            "+MVP_OK\n",
+        )
+        self.assertEqual(
+            self.client.get(f"/v1/tasks/{task_id}/artifacts/secret").status_code,
+            404,
+        )
+
+    def test_failed_task_without_outputs_has_readable_result(self):
+        task_id = "f" * 32
+        task_dir = self.root / "tasks" / task_id
+        task_dir.mkdir(parents=True)
+        (task_dir / "task.json").write_text(
+            json.dumps({"task_id": task_id, "status": "failed", "error": "DockerException"})
+        )
+        response = self.client.get(f"/v1/tasks/{task_id}/result")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["error"], "DockerException")
+        self.assertIsNone(response.json()["exit_code"])
+        self.assertEqual(response.json()["artifacts"], [])
+        self.assertEqual(self.client.get("/v1/tasks/bad/result").status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

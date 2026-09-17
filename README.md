@@ -30,7 +30,7 @@ curl http://127.0.0.1:18080/health/live
 curl http://127.0.0.1:18080/health/ready
 ```
 
-API Manager 现已支持最小任务接口：`POST /v1/tasks` 接收 HTTPS 仓库、分支和 Prompt，创建一次性 Runner；`GET /v1/tasks/{task_id}` 查询状态；`GET /v1/tasks/{task_id}/events` 实时推送 Codex 事件；`GET /v1/capacity` 查看单机并发。Runner 完成或超时后由 Manager 删除，结果文件暂存于 `/data/codex-mvp/results/{task_id}`。结果下载接口将在下一步实现。
+API Manager 现已支持最小任务接口：`POST /v1/tasks` 接收 HTTPS 仓库、分支和 Prompt，创建一次性 Runner；`GET /v1/tasks/{task_id}` 查询状态；`GET /v1/tasks/{task_id}/events` 实时推送 Codex 事件；`GET /v1/tasks/{task_id}/result` 返回最终回答、退出码和 diff；`GET /v1/capacity` 查看单机并发。Runner 完成或超时后由 Manager 删除，结果文件暂存于 `/data/codex-mvp/results/{task_id}`。
 
 实验请求示例：
 
@@ -48,6 +48,14 @@ curl -N -H 'Accept: text/event-stream' \
 ```
 
 事件包含递增的 `id`、`event` 和 JSON `data`；断线后把最后收到的数字 `id` 放入 `Last-Event-ID` 请求头即可续读。空闲时每 15 秒发送 heartbeat，任务结束时发送 `task.completed` 或 `task.failed` 并关闭流。Manager 端口仅绑定服务器回环地址。本阶段任务状态由本机文件保存，Manager 在运行中重启时尚无任务恢复机制。
+
+任务结束后读取 `links.result`：
+
+```bash
+curl -sS http://127.0.0.1:18080/v1/tasks/<task_id>/result
+```
+
+任务尚在运行时返回 `202` 和 `Retry-After: 2`；结束后返回 `200`，包含 `status`、`exit_code`、`final_message`、`diff` 和产物下载链接。可下载的产物为 `changes.diff` 与 `codex-events.jsonl`。
 
 Runner 已在 ARM64 服务器上通过一次性容器完成源码执行验证：克隆临时 Git 仓库、调用 Codex 修改 `README.md`、导出 JSONL 事件和 diff，然后自动删除容器。Runner 使用 Docker 容器作为隔离边界，容器内不再启动嵌套的 bubblewrap 沙箱。
 

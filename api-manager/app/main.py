@@ -13,10 +13,10 @@ import docker
 from docker.errors import DockerException
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
-from starlette.responses import StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 
 
-app = FastAPI(title="Codex Sandbox MVP", version="0.3.0")
+app = FastAPI(title="Codex Sandbox MVP", version="0.4.0")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.environ.get("HOST_DATA_DIR", "/data/codex-mvp"))
 TASK_DIR = DATA_DIR / "tasks"
@@ -26,6 +26,7 @@ RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "")
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "180"))
 SSE_POLL_SECONDS = 0.25
 SSE_HEARTBEAT_SECONDS = 15
+DOWNLOADABLE_ARTIFACTS = {"changes.diff", "codex-events.jsonl"}
 _lock = threading.Lock()
 
 
@@ -67,6 +68,16 @@ def _read_task(task_id: str) -> dict:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="task not found")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _validated_task(task_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
+        raise HTTPException(status_code=404, detail="task not found")
+    return _read_task(task_id)
+
+
+def _optional_text(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
 
 
 def _write_task(task: dict) -> None:
@@ -251,22 +262,19 @@ async def create_task(request: TaskRequest, background_tasks: BackgroundTasks) -
         "links": {
             "self": f"/v1/tasks/{task_id}",
             "events": f"/v1/tasks/{task_id}/events",
+            "result": f"/v1/tasks/{task_id}/result",
         },
     }
 
 
 @app.get("/v1/tasks/{task_id}")
 async def get_task(task_id: str) -> dict:
-    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
-        raise HTTPException(status_code=404, detail="task not found")
-    return _read_task(task_id)
+    return _validated_task(task_id)
 
 
 @app.get("/v1/tasks/{task_id}/events")
 async def get_task_events(task_id: str, request: Request) -> StreamingResponse:
-    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
-        raise HTTPException(status_code=404, detail="task not found")
-    _read_task(task_id)
+    _validated_task(task_id)
     last_event_id = request.headers.get("last-event-id", "0")
     if not last_event_id.isdecimal():
         raise HTTPException(status_code=400, detail="Last-Event-ID must be a nonnegative integer")
@@ -275,3 +283,55 @@ async def get_task_events(task_id: str, request: Request) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/v1/tasks/{task_id}/result")
+async def get_task_result(task_id: str):
+    task = _validated_task(task_id)
+    if task["status"] in {"starting", "running"}:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={"task_id": task_id, "status": task["status"]},
+            headers={"Retry-After": "2"},
+        )
+
+    result_dir = RESULT_DIR / task_id
+    raw_exit_code = _optional_text(result_dir / "exit-code.txt")
+    try:
+        exit_code = int(raw_exit_code.strip()) if raw_exit_code is not None else None
+    except ValueError:
+        exit_code = None
+    artifacts = [
+        {
+            "name": name,
+            "size_bytes": (result_dir / name).stat().st_size,
+            "download_url": f"/v1/tasks/{task_id}/artifacts/{name}",
+        }
+        for name in sorted(DOWNLOADABLE_ARTIFACTS)
+        if (result_dir / name).is_file()
+    ]
+    return {
+        "task_id": task_id,
+        "status": task["status"],
+        "exit_code": exit_code,
+        "final_message": _optional_text(result_dir / "final-message.md"),
+        "git_status": _optional_text(result_dir / "git-status.txt"),
+        "diff": _optional_text(result_dir / "changes.diff"),
+        "artifacts": artifacts,
+        "error": task.get("error"),
+        "started_at": task.get("started_at"),
+        "finished_at": task.get("finished_at"),
+    }
+
+
+@app.get("/v1/tasks/{task_id}/artifacts/{name}")
+async def download_task_artifact(task_id: str, name: str) -> FileResponse:
+    task = _validated_task(task_id)
+    if task["status"] in {"starting", "running"}:
+        raise HTTPException(status_code=409, detail="task is still running")
+    if name not in DOWNLOADABLE_ARTIFACTS:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    path = RESULT_DIR / task_id / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="artifact not found")
+    return FileResponse(path, filename=name)
