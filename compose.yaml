@@ -1,8 +1,29 @@
 services:
+  codex-postgres:
+    image: public.ecr.aws/docker/library/postgres:16-alpine
+    container_name: codex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: codex
+      POSTGRES_USER: codex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - /data/codex-mvp/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codex -d codex"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   codex-api-manager:
     image: ghcr.io/${GITHUB_OWNER}/codex-api-manager:${IMAGE_TAG:-latest}
     container_name: codex-api-manager
     restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      codex-postgres:
+        condition: service_healthy
     ports:
       - "127.0.0.1:18080:8080"
     environment:
@@ -13,6 +34,9 @@ services:
       HOST_DATA_DIR: /data/codex-mvp
       TASK_TIMEOUT_SECONDS: "180"
       CACHE_CLONE_TIMEOUT_SECONDS: "120"
+      DATABASE_URL: postgresql+psycopg://codex:${POSTGRES_PASSWORD}@codex-postgres:5432/codex
+      ALLOW_LOCAL_DEV_USER: ${ALLOW_LOCAL_DEV_USER:-1}
+      MAX_HISTORY_BYTES: "24000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /data/codex-mvp:/data

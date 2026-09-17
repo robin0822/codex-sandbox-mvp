@@ -30,7 +30,55 @@ curl http://127.0.0.1:18080/health/live
 curl http://127.0.0.1:18080/health/ready
 ```
 
-API Manager 现已支持最小任务接口：`POST /v1/tasks` 接收 HTTPS 仓库、分支和 Prompt，创建一次性 Runner；`GET /v1/tasks/{task_id}` 查询状态；`GET /v1/tasks/{task_id}/events` 实时推送 Codex 事件；`GET /v1/tasks/{task_id}/result` 返回最终回答、退出码和 diff；`GET /v1/capacity` 查看单机并发。Runner 完成或超时后由 Manager 删除，结果文件暂存于 `/data/codex-mvp/results/{task_id}`。
+API Manager 支持 `POST /v1/tasks` 创建一次性 Runner；`GET /v1/tasks/{task_id}` 查询状态；`GET /v1/tasks/{task_id}/events` 实时推送 Codex 事件；`GET /v1/tasks/{task_id}/result` 返回最终回答、退出码和 diff；`GET /v1/capacity` 查看单机并发。Runner 完成或超时后由 Manager 删除，结果文件暂存于 `/data/codex-mvp/results/{task_id}`。
+
+## 多窗口对话与五轮上下文
+
+对话元数据持久化在 PostgreSQL。一个用户可拥有多个对话窗口，历史问答完整保留并分页读取；每次执行只从**当前窗口最近五轮成功问答**选取上下文。失败任务显示在历史中，但不计入模型上下文。超出 `MAX_HISTORY_BYTES` 的上下文会从最旧的一整轮开始舍弃；响应里的 `context_rounds_used` 表示实际使用轮数。该字节预算是应用侧保护值，不代表模型真实 Token 上限。
+
+新增接口：
+
+| 接口 | 作用 |
+| --- | --- |
+| `GET /v1/me` | 返回当前用户标识 |
+| `POST /v1/conversations` | 创建绑定仓库的新窗口 |
+| `GET /v1/conversations?limit=50&offset=0` | 分页列出当前用户的窗口摘要 |
+| `GET /v1/conversations/{id}` | 读取窗口信息和运行中的任务 ID |
+| `GET /v1/conversations/{id}/turns?limit=20&before_seq=N` | 向前分页读取该窗口完整历史 |
+| `POST /v1/conversations/{id}/turns` | 提交当前问题，返回 `turn_id`、`task_id`、事件与结果链接 |
+
+提交示例：`{"message":"继续解释上一条回答","request_id":"client-generated-id"}`。`request_id` 用于安全重试，不能在同一窗口复用到不同问题。每个窗口同时只允许一个运行中的任务；其他窗口仍受 `MAX_ACTIVE_TASKS` 全局限制。原有单次任务接口和 Runner 创建、销毁流程保持不变。
+
+`USER_API_KEYS_JSON` 可配置用户与 API Key。在 `.env` 中写入 `USER_API_KEYS_JSON='{"alice":"replace-with-random-key","bob":"replace-with-another-key"}'`，并设 `ALLOW_LOCAL_DEV_USER=0`。配置后，所有对话和任务接口要求 `Authorization: Bearer <key>`，任务事件、结果和产物也按所有者校验。未配置时仅用于本地实验，所有请求属于 `local-dev`。浏览器输入的 Key 只保存在本地 Web 服务进程的短时会话中，浏览器只收 HttpOnly Cookie。
+
+新窗口只继承仓库设置，不继承任何对话上下文。每轮仍使用新 Runner 和仓库独立副本，因此历史任务里未提交的文件变更不会自动出现在下一轮。
+
+## 本地前端原型
+
+无需安装前端依赖，在本机运行：
+
+```bash
+python3 web/server.py
+```
+
+打开 <http://127.0.0.1:5173>。左侧从服务端加载用户的对话窗口；打开窗口后分页读取完整历史，中间显示多轮提问与回答，运行时实时展示 SSE 事件，右侧可查看每轮代码变更。刷新会恢复当前窗口及其历史。新对话在第一次提问时创建；仓库设置在该窗口内固定。技能、MCP 和知识库目前只是预留入口。页面提交时只发送当前问题，最近五轮上下文由 API Manager 从数据库读取。
+
+如果 API Manager 在远程服务器上且只监听其回环地址，正常情况下先在另一个本机终端建立 SSH 转发：
+
+```bash
+ssh -L 18080:127.0.0.1:18080 root@<server-ip>
+```
+
+前端代理默认访问本机 `http://127.0.0.1:18080`。需要改端口时可设置 `CODEX_API_BASE` 和 `CODEX_WEB_PORT`。前端服务器本身只监听 `127.0.0.1`。
+
+当前实验服务器禁止 SSH TCP 转发，可改用本地 SSH 命令通道。它不会改动服务器配置；密码只在本地进程内使用，不写入项目：
+
+```bash
+python3 -m pip install -r web/requirements.txt
+CODEX_SSH_HOST=172.29.231.119 CODEX_SSH_USER=root python3 web/server.py
+```
+
+启动时输入 SSH 密码。`CODEX_REMOTE_API_PORT` 默认 `18080`，可用于测试其他端口。每次提问仍会创建新的任务；页面刷新后从数据库恢复完整历史。技能、MCP 和知识库尚未接入。
 
 仓库首次使用时由 Manager 从远程创建裸仓库缓存，保存在 `/data/codex-mvp/repo-cache`。之后相同 URL 的任务不访问远程仓库：Runner 只读挂载缓存，在自己的容器内创建独立副本并检出记录的 commit。分支后续更新不会自动进入缓存；需要最新代码时，在请求的 `repository` 中传入 `"refresh": true`，本次任务会先增量更新缓存。每次任务仍使用全新的 Runner 和工作目录。首次远程克隆最多等待 120 秒。
 

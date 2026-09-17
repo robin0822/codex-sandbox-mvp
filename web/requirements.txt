@@ -1,0 +1,2 @@
+# Only needed when CODEX_SSH_HOST is used because the server disallows TCP forwarding.
+paramiko>=3,<5

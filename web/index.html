@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f8fa" />
+    <title>Codex 工作台</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="侧边导航">
+        <div class="sidebar-top">
+          <a class="brand" href="/" aria-label="Codex 工作台首页">
+            <span class="brand-mark" aria-hidden="true">✳</span>
+            <span>Codex <em>工作台</em></span>
+          </a>
+          <button class="icon-button sidebar-close" id="sidebar-close" type="button" aria-label="关闭导航">×</button>
+        </div>
+
+        <button class="new-chat-button" id="new-chat" type="button"><span aria-hidden="true">＋</span> 新对话</button>
+
+        <nav class="side-nav" aria-label="工作台功能">
+          <button type="button" class="nav-item selected" id="nav-chat"><span class="nav-icon">◫</span> 对话工作台</button>
+          <button type="button" class="nav-item future-feature" data-feature="技能"><span class="nav-icon">✦</span> 技能 <small>即将接入</small></button>
+          <button type="button" class="nav-item future-feature" data-feature="MCP 连接"><span class="nav-icon">⌘</span> MCP 连接 <small>即将接入</small></button>
+          <button type="button" class="nav-item future-feature" data-feature="知识库"><span class="nav-icon">▤</span> 知识库 <small>即将接入</small></button>
+        </nav>
+
+        <div class="history-section">
+          <div class="history-heading"><span>我的对话</span><span id="history-count">0</span></div>
+          <div class="history-list" id="history-list">
+            <p class="history-empty">正在加载对话…</p>
+          </div>
+          <button class="load-conversations hidden" id="load-conversations" type="button">加载更多对话</button>
+        </div>
+
+        <div class="sidebar-footer">
+          <span class="footer-indicator" id="api-indicator"><i></i><span>检测接口中</span></span>
+          <span class="footer-caption" id="user-label">历史永久可查 · 模型只读最近 5 轮</span>
+        </div>
+      </aside>
+
+      <div class="main-column">
+        <header class="topbar">
+          <div class="topbar-start">
+            <button class="icon-button mobile-menu" id="mobile-menu" type="button" aria-label="打开导航">☰</button>
+            <div class="top-title"><strong id="top-title">新对话</strong><span>同一窗口记住最近 5 轮问答</span></div>
+          </div>
+          <div class="topbar-actions">
+            <button class="project-button" id="project-button" type="button" aria-expanded="false" aria-controls="project-popover"><span class="project-dot"></span><span id="project-label">Hello-World</span><span class="chevron">⌄</span></button>
+            <span class="run-pill"><i></i>独立 Runner</span>
+            <button class="account-button" id="account-button" type="button" title="用户身份">本地用户</button>
+            <button class="detail-button" id="detail-button" type="button" disabled>执行详情 <span>↗</span></button>
+          </div>
+        </header>
+
+        <div class="popover project-popover hidden" id="project-popover">
+          <div class="popover-heading"><strong>当前代码仓库</strong><span>任务在此仓库的独立副本中执行</span></div>
+          <label for="repository-url">Git HTTPS 地址</label>
+          <input id="repository-url" type="url" value="https://github.com/octocat/Hello-World.git" placeholder="https://github.com/owner/repository.git" />
+          <div class="project-row">
+            <div><label for="repository-ref">分支 / 标签</label><input id="repository-ref" type="text" value="master" /></div>
+            <label class="refresh-row" for="repository-refresh"><input id="repository-refresh" type="checkbox" /><span>更新仓库缓存</span></label>
+          </div>
+          <button type="button" class="popover-save" id="project-save">保存设置</button>
+        </div>
+
+        <main class="chat-layout">
+          <div class="chat-scroll" id="chat-scroll">
+            <section class="welcome" id="welcome">
+              <div class="welcome-symbol" aria-hidden="true">✳</div>
+              <div class="welcome-kicker">CODEX WORKSPACE</div>
+              <h1>你好，今天想做什么？</h1>
+              <p>新建一个对话，连续追问时会携带本窗口最近 5 轮问答。每轮仍在独立环境执行。</p>
+              <div class="suggestions">
+                <button class="suggestion" type="button" data-prompt="阅读 README，概括这个项目的用途和主要结构。"><span>了解项目</span><small>阅读 README 并概括结构</small><b>↗</b></button>
+                <button class="suggestion" type="button" data-prompt="检查仓库中的代码，找出一个值得优先修复的问题，并说明原因。"><span>检查代码</span><small>找到值得优先修复的问题</small><b>↗</b></button>
+                <button class="suggestion" type="button" data-prompt="在 README 末尾添加一行 CODEX_UI_DEMO_OK，并简要说明修改。"><span>修改文件</span><small>完成一次可验证的代码变更</small><b>↗</b></button>
+              </div>
+            </section>
+
+            <section class="conversation hidden" id="conversation" aria-label="当前对话">
+              <button class="load-older hidden" id="load-older" type="button">加载更早的对话</button>
+              <div id="turn-list"></div>
+            </section>
+          </div>
+
+          <div class="composer-zone">
+            <div class="composer-wrap">
+              <div class="composer" id="composer">
+                <textarea id="prompt-input" rows="2" maxlength="20000" placeholder="向 Codex 提问，或描述你想完成的任务…" aria-label="输入你的问题"></textarea>
+                <div class="composer-bottom">
+                  <div class="composer-tools">
+                    <button type="button" class="tool-button future-feature" data-feature="技能"><span>✦</span> 技能</button>
+                    <button type="button" class="tool-button future-feature" data-feature="MCP 连接"><span>⌘</span> MCP</button>
+                    <button type="button" class="tool-button future-feature" data-feature="知识库"><span>▤</span> 知识库</button>
+                  </div>
+                  <div class="send-actions">
+                    <span id="prompt-count">0 / 20000</span>
+                    <button type="button" class="send-button" id="send-button" aria-label="发送问题" title="发送（Enter）">➤</button>
+                  </div>
+                </div>
+              </div>
+              <p class="composer-caption" id="composer-caption">每轮使用新 Runner；仅本窗口最近 5 轮问答参与上下文。Enter 发送，Shift+Enter 换行。</p>
+            </div>
+          </div>
+        </main>
+      </div>
+
+      <aside class="detail-panel hidden" id="detail-panel" aria-label="执行详情">
+        <div class="detail-head"><div><small>RUN DETAILS</small><h2>执行详情</h2></div><button class="icon-button" id="detail-close" type="button" aria-label="关闭详情">×</button></div>
+        <div class="detail-scroll">
+          <section class="detail-section"><h3>任务信息</h3><dl id="task-facts"></dl></section>
+          <section class="detail-section"><div class="detail-section-title"><h3>代码变更</h3><span id="diff-count"></span></div><pre id="diff-output">任务结束后显示文件变更。</pre></section>
+          <a class="download-link hidden" id="events-download" href="#" download>下载完整事件 JSONL ↗</a>
+        </div>
+      </aside>
+    </div>
+
+    <div class="toast hidden" id="toast" role="status"></div>
+    <div class="login-overlay hidden" id="login-overlay">
+      <form class="login-card" id="login-form">
+        <span class="brand-mark" aria-hidden="true">✳</span>
+        <h2>连接你的工作台</h2>
+        <p>请输入用户 API Key，不是用户名或模型密钥。本地测试时，打开项目根目录的 <code>.local-user-keys.json</code>，复制 <code>admin</code> 或 <code>tester</code> 对应的长字符串。</p>
+        <input id="login-key" type="password" autocomplete="off" placeholder="粘贴用户 API Key" aria-label="用户 API Key" required />
+        <button type="submit">进入工作台</button>
+        <span id="login-error" role="alert"></span>
+      </form>
+    </div>
+  </body>
+</html>
