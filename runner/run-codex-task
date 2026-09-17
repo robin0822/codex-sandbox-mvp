@@ -6,6 +6,9 @@ mkdir -p /workspace/repository /results
 repository_commit="$(cat /job/repository-commit.txt)"
 clone_started_ns="$(date +%s%N)"
 
+# The cache is owned by Manager on the host, while Runner uses a separate UID.
+git config --global --add safe.directory /cache/repository.git
+
 git clone \
   --no-local \
   /cache/repository.git \
