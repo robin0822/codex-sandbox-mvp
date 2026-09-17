@@ -3,20 +3,23 @@ set -euo pipefail
 
 mkdir -p /workspace/repository /results
 
-repository_url="$(cat /job/repository-url.txt)"
-repository_ref="$(cat /job/repository-ref.txt)"
+repository_commit="$(cat /job/repository-commit.txt)"
+clone_started_ns="$(date +%s%N)"
 
 git clone \
-  --branch "${repository_ref}" \
-  --single-branch \
-  "${repository_url}" \
+  --no-local \
+  /cache/repository.git \
   /workspace/repository
+git -C /workspace/repository checkout --detach "${repository_commit}"
+clone_finished_ns="$(date +%s%N)"
+printf '%s' "$(( (clone_finished_ns - clone_started_ns) / 1000000 ))" > /results/clone-milliseconds.txt
 
 cd /workspace/repository
 set +e
 
 # Each task already runs inside its own Docker container. Nested bubblewrap
 # namespaces fail under the default Docker seccomp profile.
+codex_started_ns="$(date +%s%N)"
 codex exec \
   --ephemeral \
   --json \
@@ -27,10 +30,11 @@ codex exec \
   2> /results/codex-stderr.log
 
 codex_exit_code=$?
+codex_finished_ns="$(date +%s%N)"
+printf '%s' "$(( (codex_finished_ns - codex_started_ns) / 1000000 ))" > /results/codex-milliseconds.txt
 
 git status --porcelain=v1 > /results/git-status.txt
 git diff --binary > /results/changes.diff
 printf '%s' "${codex_exit_code}" > /results/exit-code.txt
 
 exit "${codex_exit_code}"
-

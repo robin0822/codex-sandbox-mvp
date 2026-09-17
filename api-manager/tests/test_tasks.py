@@ -1,5 +1,7 @@
 import asyncio
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +52,7 @@ class TaskLifecycleTest(unittest.TestCase):
             patch.object(main, "HOST_DATA_DIR", self.root),
             patch.object(main, "TASK_DIR", self.root / "tasks"),
             patch.object(main, "RESULT_DIR", self.root / "results"),
+            patch.object(main, "REPO_CACHE_DIR", self.root / "repo-cache"),
             patch.object(main, "RUNNER_IMAGE", "runner:test"),
             patch.object(main, "MAX_ACTIVE_TASKS", 1),
             patch.object(main.docker, "from_env", return_value=self.docker),
@@ -62,13 +65,18 @@ class TaskLifecycleTest(unittest.TestCase):
         self.client = TestClient(main.app)
 
     def test_task_starts_runner_and_removes_it(self):
-        response = self.client.post(
-            "/v1/tasks",
-            json={
-                "repository": {"url": "https://example.com/repo.git", "ref": "main"},
-                "prompt": "Review the README",
-            },
-        )
+        with patch.object(
+            main,
+            "_prepare_repository",
+            return_value=(self.root / "repo-cache" / "mirror.git", True, False, "a" * 40, 0.002),
+        ):
+            response = self.client.post(
+                "/v1/tasks",
+                json={
+                    "repository": {"url": "https://example.com/repo.git", "ref": "main"},
+                    "prompt": "Review the README",
+                },
+            )
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
         self.assertEqual(self.docker.image, "runner:test")
@@ -77,9 +85,58 @@ class TaskLifecycleTest(unittest.TestCase):
             "/job",
         )
         self.assertEqual(self.docker.options["environment"]["MODEL_API_KEY"], "test-key")
+        self.assertEqual(
+            self.docker.options["volumes"][str(self.root / "repo-cache" / "mirror.git")]["mode"],
+            "ro",
+        )
         self.assertTrue(self.container.removed)
         self.assertEqual(self.client.get(f"/v1/tasks/{task_id}").json()["status"], "failed")
+        self.assertTrue(self.client.get(f"/v1/tasks/{task_id}").json()["cache_hit"])
         self.assertEqual(self.client.get("/v1/capacity").json()["running_tasks"], 0)
+
+    def test_repository_cache_cold_warm_and_explicit_refresh(self):
+        source = self.root / "source"
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        (source / "README.md").write_text("first\n")
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(source), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+             "commit", "-qm", "first"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(source), "branch", "-M", "main"], check=True)
+
+        def prepare(task_id, refresh=False):
+            job = self.root / "tasks" / task_id / "job"
+            job.mkdir(parents=True)
+            (job / "repository-url.txt").write_text(str(source))
+            (job / "repository-ref.txt").write_text("main")
+            (job / "repository-refresh.txt").write_text("1" if refresh else "0")
+            return main._prepare_repository(task_id)
+
+        cache_path, cold_hit, cold_refresh, old_commit, _ = prepare("1" * 32)
+        self.assertFalse(cold_hit)
+        self.assertFalse(cold_refresh)
+        self.assertTrue((self.root / "repo-cache" / cache_path.name).is_dir())
+        (source / "README.md").write_text("second\n")
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(source), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+             "commit", "-qm", "second"],
+            check=True,
+        )
+        _, warm_hit, warm_refresh, cached_commit, _ = prepare("2" * 32)
+        self.assertTrue(warm_hit)
+        self.assertFalse(warm_refresh)
+        self.assertEqual(cached_commit, old_commit)
+        _, refresh_hit, refreshed, new_commit, _ = prepare("3" * 32, refresh=True)
+        self.assertTrue(refresh_hit)
+        self.assertTrue(refreshed)
+        self.assertNotEqual(new_commit, old_commit)
+        shutil.rmtree(source)
+        _, offline_hit, _, offline_commit, _ = prepare("4" * 32)
+        self.assertTrue(offline_hit)
+        self.assertEqual(offline_commit, new_commit)
 
     def test_capacity_and_repository_validation(self):
         self.assertEqual(
@@ -183,6 +240,8 @@ class TaskLifecycleTest(unittest.TestCase):
         (result_dir / "git-status.txt").write_text(" M README.md\n")
         (result_dir / "changes.diff").write_text("+MVP_OK\n")
         (result_dir / "codex-events.jsonl").write_text('{"type":"turn.completed"}\n')
+        (result_dir / "clone-milliseconds.txt").write_text("120")
+        (result_dir / "codex-milliseconds.txt").write_text("5432")
         response = self.client.get(f"/v1/tasks/{task_id}/result")
         self.assertEqual(response.status_code, 200)
         result = response.json()
@@ -190,6 +249,8 @@ class TaskLifecycleTest(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(result["final_message"], "Done")
         self.assertEqual(result["diff"], "+MVP_OK\n")
+        self.assertEqual(result["timings_ms"]["local_clone"], 120)
+        self.assertEqual(result["timings_ms"]["codex"], 5432)
         self.assertEqual(len(result["artifacts"]), 2)
         self.assertEqual(
             self.client.get(f"/v1/tasks/{task_id}/artifacts/changes.diff").text,

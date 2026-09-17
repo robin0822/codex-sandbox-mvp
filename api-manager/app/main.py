@@ -1,7 +1,10 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -16,27 +19,32 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 
 
-app = FastAPI(title="Codex Sandbox MVP", version="0.4.0")
+app = FastAPI(title="Codex Sandbox MVP", version="0.5.0")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.environ.get("HOST_DATA_DIR", "/data/codex-mvp"))
 TASK_DIR = DATA_DIR / "tasks"
 RESULT_DIR = DATA_DIR / "results"
+REPO_CACHE_DIR = DATA_DIR / "repo-cache"
 MAX_ACTIVE_TASKS = int(os.environ.get("MAX_ACTIVE_TASKS", "1"))
 RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "")
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "180"))
+CACHE_CLONE_TIMEOUT_SECONDS = int(os.environ.get("CACHE_CLONE_TIMEOUT_SECONDS", "120"))
 SSE_POLL_SECONDS = 0.25
 SSE_HEARTBEAT_SECONDS = 15
 DOWNLOADABLE_ARTIFACTS = {"changes.diff", "codex-events.jsonl"}
 _lock = threading.Lock()
+_cache_lock = threading.Lock()
 
 
 class Repository(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
     ref: str = Field(default="main", min_length=1, max_length=200)
+    refresh: bool = False
 
     @field_validator("url")
     @classmethod
     def validate_url(cls, value: str) -> str:
+        value = value.strip()
         parsed = urlsplit(value)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("repository.url must be an HTTPS URL without embedded credentials")
@@ -80,6 +88,16 @@ def _optional_text(path: Path) -> str | None:
     return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
 
 
+def _optional_int(path: Path) -> int | None:
+    value = _optional_text(path)
+    if value is None:
+        return None
+    try:
+        return int(value.strip())
+    except ValueError:
+        return None
+
+
 def _write_task(task: dict) -> None:
     path = _task_file(task["task_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +111,58 @@ def _active_count() -> int:
         json.loads(path.read_text(encoding="utf-8"))["status"] in {"starting", "running"}
         for path in TASK_DIR.glob("*/task.json")
     )
+
+
+def _prepare_repository(task_id: str) -> tuple[Path, bool, bool, str, float]:
+    job_dir = TASK_DIR / task_id / "job"
+    url = (job_dir / "repository-url.txt").read_text(encoding="utf-8")
+    ref = (job_dir / "repository-ref.txt").read_text(encoding="utf-8")
+    refresh = (job_dir / "repository-refresh.txt").read_text(encoding="utf-8") == "1"
+    cache_key = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    mirror = REPO_CACHE_DIR / f"{cache_key}.git"
+    cache_hit = mirror.is_dir()
+    refreshed = False
+    started = time.monotonic()
+    git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+    if not cache_hit:
+        REPO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        staging = REPO_CACHE_DIR / f".{cache_key}.{uuid.uuid4().hex}.tmp"
+        try:
+            subprocess.run(
+                ["git", "clone", "--mirror", "--", url, str(staging)],
+                check=True,
+                timeout=CACHE_CLONE_TIMEOUT_SECONDS,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=git_env,
+            )
+            staging.rename(mirror)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+    elif refresh:
+        subprocess.run(
+            ["git", "--git-dir", str(mirror), "remote", "update", "--prune"],
+            check=True,
+            timeout=CACHE_CLONE_TIMEOUT_SECONDS,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=git_env,
+        )
+        refreshed = True
+
+    commit = subprocess.run(
+        ["git", "--git-dir", str(mirror), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (job_dir / "repository-commit.txt").write_text(commit, encoding="utf-8")
+    host_mirror = HOST_DATA_DIR / "repo-cache" / mirror.name
+    return host_mirror, cache_hit, refreshed, commit, round(time.monotonic() - started, 3)
 
 
 def _sse_event(task_id: str, sequence: int, event_type: str, data: dict) -> str:
@@ -160,6 +230,13 @@ def _run_task(task_id: str) -> None:
     container = None
     task = _read_task(task_id)
     try:
+        with _cache_lock:
+            host_mirror, cache_hit, refreshed, commit, cache_seconds = _prepare_repository(task_id)
+        task["cache_hit"] = cache_hit
+        task["cache_refreshed"] = refreshed
+        task["cache_prepare_seconds"] = cache_seconds
+        task["source_commit"] = commit
+        _write_task(task)
         client = docker.from_env()
         container = client.containers.run(
             RUNNER_IMAGE,
@@ -170,6 +247,7 @@ def _run_task(task_id: str) -> None:
             volumes={
                 str(HOST_DATA_DIR / "tasks" / task_id / "job"): {"bind": "/job", "mode": "ro"},
                 str(HOST_DATA_DIR / "results" / task_id): {"bind": "/results", "mode": "rw"},
+                str(host_mirror): {"bind": "/cache/repository.git", "mode": "ro"},
             },
             labels={"codex.mvp.managed": "true", "codex.mvp.task_id": task_id},
             mem_limit="2g",
@@ -192,7 +270,10 @@ def _run_task(task_id: str) -> None:
         if task["status"] != "timed_out":
             exit_file = RESULT_DIR / task_id / "exit-code.txt"
             task["status"] = "succeeded" if exit_file.is_file() and exit_file.read_text().strip() == "0" else "failed"
-    except (DockerException, OSError, KeyError) as exc:
+    except subprocess.TimeoutExpired:
+        task["status"] = "timed_out"
+        task["error"] = "RepositoryCacheTimeout"
+    except (DockerException, OSError, KeyError, subprocess.CalledProcessError) as exc:
         task["status"] = "failed"
         task["error"] = type(exc).__name__
     finally:
@@ -250,6 +331,9 @@ async def create_task(request: TaskRequest, background_tasks: BackgroundTasks) -
         job_dir.mkdir(parents=True)
         (job_dir / "repository-url.txt").write_text(request.repository.url, encoding="utf-8")
         (job_dir / "repository-ref.txt").write_text(request.repository.ref, encoding="utf-8")
+        (job_dir / "repository-refresh.txt").write_text(
+            "1" if request.repository.refresh else "0", encoding="utf-8"
+        )
         (job_dir / "prompt.txt").write_text(request.prompt, encoding="utf-8")
         results = RESULT_DIR / task_id
         results.mkdir(parents=True)
@@ -296,11 +380,15 @@ async def get_task_result(task_id: str):
         )
 
     result_dir = RESULT_DIR / task_id
-    raw_exit_code = _optional_text(result_dir / "exit-code.txt")
-    try:
-        exit_code = int(raw_exit_code.strip()) if raw_exit_code is not None else None
-    except ValueError:
-        exit_code = None
+    total_ms = None
+    if task.get("created_at") and task.get("finished_at"):
+        total_ms = round(
+            (
+                datetime.fromisoformat(task["finished_at"])
+                - datetime.fromisoformat(task["created_at"])
+            ).total_seconds()
+            * 1000
+        )
     artifacts = [
         {
             "name": name,
@@ -313,10 +401,25 @@ async def get_task_result(task_id: str):
     return {
         "task_id": task_id,
         "status": task["status"],
-        "exit_code": exit_code,
+        "exit_code": _optional_int(result_dir / "exit-code.txt"),
         "final_message": _optional_text(result_dir / "final-message.md"),
         "git_status": _optional_text(result_dir / "git-status.txt"),
         "diff": _optional_text(result_dir / "changes.diff"),
+        "repository": {
+            "commit": task.get("source_commit"),
+            "cache_hit": task.get("cache_hit"),
+            "cache_refreshed": task.get("cache_refreshed"),
+        },
+        "timings_ms": {
+            "total": total_ms,
+            "cache_prepare": (
+                round(task["cache_prepare_seconds"] * 1000)
+                if task.get("cache_prepare_seconds") is not None
+                else None
+            ),
+            "local_clone": _optional_int(result_dir / "clone-milliseconds.txt"),
+            "codex": _optional_int(result_dir / "codex-milliseconds.txt"),
+        },
         "artifacts": artifacts,
         "error": task.get("error"),
         "started_at": task.get("started_at"),
