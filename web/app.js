@@ -535,6 +535,7 @@ async function openConversation(id) {
     renderTurns();
     const active = state.turns.find((turn) => turn.task_id === conversation.active_task_id);
     if (active) connectEvents(active);
+    else if (state.turns.at(-1)?.task_id) loadEvents(state.turns.at(-1));
   } catch (error) {
     if (navigation === state.navigation) toast("打开对话失败：" + error.message);
   }
