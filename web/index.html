@@ -23,7 +23,7 @@
 
         <nav class="side-nav" aria-label="工作台功能">
           <button type="button" class="nav-item selected" id="nav-chat"><span class="nav-icon">◫</span> 对话工作台</button>
-          <button type="button" class="nav-item future-feature" data-feature="技能"><span class="nav-icon">✦</span> 技能 <small>即将接入</small></button>
+          <button type="button" class="nav-item" id="nav-skills"><span class="nav-icon">✦</span> 技能广场</button>
           <button type="button" class="nav-item future-feature" data-feature="MCP 连接"><span class="nav-icon">⌘</span> MCP 连接 <small>即将接入</small></button>
           <button type="button" class="nav-item future-feature" data-feature="知识库"><span class="nav-icon">▤</span> 知识库 <small>即将接入</small></button>
         </nav>
@@ -46,7 +46,7 @@
         <header class="topbar">
           <div class="topbar-start">
             <button class="icon-button mobile-menu" id="mobile-menu" type="button" aria-label="打开导航">☰</button>
-            <div class="top-title"><strong id="top-title">新对话</strong><span>同一窗口记住最近 5 轮问答</span></div>
+            <div class="top-title"><strong id="top-title">新对话</strong><span id="top-subtitle">同一窗口记住最近 5 轮问答</span></div>
           </div>
           <div class="topbar-actions">
             <button class="project-button" id="project-button" type="button" aria-expanded="false" aria-controls="project-popover"><span class="project-dot"></span><span id="project-label">Hello-World</span><span class="chevron">⌄</span></button>
@@ -67,7 +67,16 @@
           <button type="button" class="popover-save" id="project-save">保存设置</button>
         </div>
 
-        <main class="chat-layout">
+        <main class="skills-page hidden" id="skills-page" aria-label="技能广场">
+          <div class="skills-page-head">
+            <div><span class="skills-kicker">SKILLS MARKETPLACE</span><h1>技能广场</h1><p>从公共目录安装技能。每位用户的技能单独保存，并在新任务中加载。</p></div>
+            <button type="button" class="skills-back" id="skills-back">返回对话</button>
+          </div>
+          <div class="skills-count" id="skills-count">正在加载技能…</div>
+          <div class="skills-grid" id="skills-grid"></div>
+        </main>
+
+        <main class="chat-layout" id="chat-layout">
           <div class="chat-scroll" id="chat-scroll">
             <section class="welcome" id="welcome">
               <div class="welcome-symbol" aria-hidden="true">✳</div>
@@ -93,7 +102,7 @@
                 <textarea id="prompt-input" rows="2" maxlength="20000" placeholder="向 Codex 提问，或描述你想完成的任务…" aria-label="输入你的问题"></textarea>
                 <div class="composer-bottom">
                   <div class="composer-tools">
-                    <button type="button" class="tool-button future-feature" data-feature="技能"><span>✦</span> 技能</button>
+                    <button type="button" class="tool-button" id="composer-skills"><span>✦</span> 技能</button>
                     <button type="button" class="tool-button future-feature" data-feature="MCP 连接"><span>⌘</span> MCP</button>
                     <button type="button" class="tool-button future-feature" data-feature="知识库"><span>▤</span> 知识库</button>
                   </div>
@@ -103,7 +112,7 @@
                   </div>
                 </div>
               </div>
-              <p class="composer-caption" id="composer-caption">每轮使用新 Runner；仅本窗口最近 5 轮问答参与上下文。Enter 发送，Shift+Enter 换行。</p>
+              <p class="composer-caption" id="composer-caption">Enter 发送，Shift+Enter 换行。</p>
             </div>
           </div>
         </main>

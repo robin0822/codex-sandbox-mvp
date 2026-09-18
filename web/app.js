@@ -22,6 +22,8 @@ const state = {
   selectedResult: null,
   navigation: 0,
   toastTimer: null,
+  skills: [],
+  skillsPage: false,
 };
 
 function toast(message) {
@@ -62,7 +64,7 @@ async function checkApi() {
   try {
     const status = await api("/api/status");
     $("api-indicator").className = "footer-indicator " + (status.ready ? "online" : "offline");
-    $("api-indicator").lastElementChild.textContent = status.ready ? "API 已连接" : "API 未连接";
+    $("api-indicator").lastElementChild.textContent = status.ready ? "Runner 已就绪" : "Runner 未就绪";
   } catch {
     $("api-indicator").className = "footer-indicator offline";
     $("api-indicator").lastElementChild.textContent = "API 未连接";
@@ -158,8 +160,105 @@ function closeStream() {
   state.liveTurnId = null;
 }
 
+function showChatView() {
+  state.skillsPage = false;
+  $("skills-page").classList.add("hidden");
+  $("chat-layout").classList.remove("hidden");
+  $("nav-chat").classList.add("selected");
+  $("nav-skills").classList.remove("selected");
+  $("top-title").textContent = shortTitle(state.activeConversation?.title);
+  $("top-subtitle").textContent = "同一窗口记住最近 5 轮问答";
+  $("sidebar").classList.remove("open");
+}
+
+function renderSkills() {
+  const grid = $("skills-grid");
+  grid.replaceChildren();
+  const installed = state.skills.filter((skill) => skill.installed).length;
+  $("skills-count").textContent = `公共技能 ${state.skills.length} 项 · 已安装 ${installed} 项`;
+  if (!state.skills.length) {
+    grid.append(node("p", "history-empty", "公共目录暂无可用技能。"));
+    return;
+  }
+  for (const skill of state.skills) {
+    const card = node("article", "skill-card");
+    const top = node("div", "skill-card-top");
+    top.append(node("span", "skill-category", skill.category || "技能"));
+    if (skill.installed) top.append(node("span", "skill-installed", "✓ 已安装"));
+    card.append(top, node("h2", null, skill.name), node("p", null, skill.description));
+    const actions = node("div", "skill-card-actions");
+    const primary = node("button", "primary", skill.installed ? "用于提问" : "安装技能");
+    primary.type = "button";
+    primary.dataset.skillId = skill.id;
+    primary.dataset.action = skill.installed ? "use" : "install";
+    actions.append(primary);
+    if (skill.installed) {
+      const remove = node("button", "remove", "卸载");
+      remove.type = "button";
+      remove.dataset.skillId = skill.id;
+      remove.dataset.action = "remove";
+      actions.append(remove);
+    }
+    card.append(actions);
+    grid.append(card);
+  }
+}
+
+async function loadSkills() {
+  const result = await api("/v1/skills/catalog");
+  state.skills = result.items;
+  renderSkills();
+}
+
+async function showSkillsView() {
+  state.skillsPage = true;
+  closeProject();
+  $("chat-layout").classList.add("hidden");
+  $("skills-page").classList.remove("hidden");
+  $("nav-chat").classList.remove("selected");
+  $("nav-skills").classList.add("selected");
+  $("top-title").textContent = "技能广场";
+  $("top-subtitle").textContent = "公共目录 · 用户独立安装";
+  $("sidebar").classList.remove("open");
+  $("skills-count").textContent = "正在加载技能…";
+  try {
+    await loadSkills();
+  } catch (error) {
+    $("skills-count").textContent = "技能加载失败";
+    toast("技能加载失败：" + error.message);
+  }
+}
+
+async function handleSkillAction(button) {
+  const skill = state.skills.find((item) => item.id === button.dataset.skillId);
+  if (!skill) return;
+  if (button.dataset.action === "use") {
+    showChatView();
+    const input = $("prompt-input");
+    input.value = `$${skill.id} ` + input.value;
+    updatePromptCount();
+    input.focus();
+    return;
+  }
+  button.disabled = true;
+  try {
+    if (button.dataset.action === "install") {
+      await api("/v1/skills/" + skill.id + "/install", { method: "POST" });
+      toast("已安装“" + skill.name + "”，新任务可以使用。");
+    } else {
+      await api("/v1/skills/" + skill.id, { method: "DELETE" });
+      toast("已从你的技能目录卸载“" + skill.name + "”。");
+    }
+    await loadSkills();
+  } catch (error) {
+    toast("操作失败：" + error.message);
+    button.disabled = false;
+  }
+}
+
 function newChat() {
   if (state.submitting) return toast("正在提交任务，请稍候。");
+  showChatView();
   closeStream();
   state.navigation += 1;
   state.activeConversation = null;
@@ -304,15 +403,17 @@ function renderTurn(turn) {
   const body = node("div", "assistant-body");
   const name = node("div", "assistant-name", "Codex");
   const status = turn.status === "succeeded" ? "已完成"
-    : turn.status === "failed" || turn.status === "timed_out" ? "执行失败" : "正在工作";
-  name.append(node("span", "assistant-state " + (turn.status === "succeeded" ? "success" : status === "执行失败" ? "error" : ""), status));
-  name.append(node("span", "context-count", "上下文 " + (turn.context_rounds_used || 0) + "/5 轮"));
+    : turn.status === "timed_out" ? "执行超时"
+    : turn.status === "failed" ? "执行失败" : "正在工作";
+  name.append(node("span", "assistant-state " + (turn.status === "succeeded" ? "success" : ["failed", "timed_out"].includes(turn.status) ? "error" : ""), status));
   body.append(name);
   if (turn.status === "starting" || turn.status === "running") {
     body.append(renderProgress(turn));
   } else {
     if (turn.events?.length) body.append(renderProgress(turn));
-    const answer = turn.assistant_message || (turn.status === "succeeded" ? "任务没有返回最终回答。" : "任务执行失败，点击执行详情查看结果。");
+    const answer = turn.assistant_message || (turn.status === "succeeded" ? "任务没有返回最终回答。"
+      : turn.status === "timed_out" ? "任务执行超时，已自动停止。点击执行详情查看过程。"
+      : "任务执行失败，点击执行详情查看结果。");
     body.append(node("div", "answer", answer));
     const actions = node("div", "answer-actions");
     const copy = node("button", null, "⧉ 复制回答");
@@ -346,7 +447,7 @@ function renderTurns(scrollBottom = true) {
   const list = $("turn-list");
   list.replaceChildren();
   for (const turn of state.turns) list.append(renderTurn(turn));
-  $("top-title").textContent = shortTitle(state.activeConversation?.title);
+  if (!state.skillsPage) $("top-title").textContent = shortTitle(state.activeConversation?.title);
   $("detail-button").disabled = !state.selectedTurn;
   updateComposer();
   if (scrollBottom) $("chat-scroll").scrollTop = $("chat-scroll").scrollHeight;
@@ -370,6 +471,7 @@ async function openConversation(id) {
     ]);
     if (navigation !== state.navigation) return;
     state.activeConversation = conversation;
+    showChatView();
     state.turns = page.items;
     state.moreTurns = page.has_more;
     state.beforeSeq = page.next_before_seq;
@@ -528,9 +630,8 @@ async function openDetails(turn) {
     state.selectedTurn = turn;
     state.selectedResult = result;
     const facts = [
-      ["状态", result.status === "succeeded" ? "已完成" : result.status || "失败"],
+      ["状态", result.status === "succeeded" ? "已完成" : result.status === "timed_out" ? "执行超时" : result.status || "失败"],
       ["任务 ID", turn.task_id],
-      ["参与上下文", turn.context_rounds_used + " 轮"],
       ["仓库", state.activeConversation.repository.url],
       ["缓存", result.repository?.cache_hit ? "已命中" : "首次创建"],
       ["总耗时", formatMs(result.timings_ms?.total)],
@@ -613,7 +714,14 @@ $("prompt-input").addEventListener("keydown", (event) => {
 });
 $("prompt-input").addEventListener("input", updatePromptCount);
 $("new-chat").addEventListener("click", newChat);
-$("nav-chat").addEventListener("click", newChat);
+$("nav-chat").addEventListener("click", showChatView);
+$("nav-skills").addEventListener("click", showSkillsView);
+$("composer-skills").addEventListener("click", showSkillsView);
+$("skills-back").addEventListener("click", showChatView);
+$("skills-grid").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-skill-id]");
+  if (button) handleSkillAction(button);
+});
 $("history-list").addEventListener("click", (event) => {
   const id = event.target.closest("[data-conversation-id]")?.dataset.conversationId;
   if (id) openConversation(id);

@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 
 from app.conversation_store import Conversation, Turn, session_factory, utcnow
+from app import skill_store
 
 
 app = FastAPI(title="Codex Sandbox MVP", version="0.5.0")
@@ -29,6 +30,7 @@ HOST_DATA_DIR = Path(os.environ.get("HOST_DATA_DIR", "/data/codex-mvp"))
 TASK_DIR = DATA_DIR / "tasks"
 RESULT_DIR = DATA_DIR / "results"
 REPO_CACHE_DIR = DATA_DIR / "repo-cache"
+SKILL_BUNDLE_DIR = Path(os.environ.get("SKILL_BUNDLE_DIR", "/app/bundled-skills"))
 MAX_ACTIVE_TASKS = int(os.environ.get("MAX_ACTIVE_TASKS", "1"))
 RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "")
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "180"))
@@ -40,6 +42,7 @@ MAX_HISTORY_ROUNDS = 5
 MAX_HISTORY_BYTES = int(os.environ.get("MAX_HISTORY_BYTES", "24000"))
 _lock = threading.Lock()
 _cache_lock = threading.Lock()
+_skill_lock = threading.Lock()
 
 
 class Repository(BaseModel):
@@ -232,12 +235,17 @@ def _create_task_files(repository: Repository, prompt: str, user_id: str,
         (job_dir / "repository-ref.txt").write_text(repository.ref, encoding="utf-8")
         (job_dir / "repository-refresh.txt").write_text("1" if repository.refresh else "0", encoding="utf-8")
         (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        with _skill_lock:
+            task_skills = skill_store.snapshot(
+                skill_store.user_dir(DATA_DIR, user_id), TASK_DIR / task_id / "skills"
+            )
         results = RESULT_DIR / task_id
         results.mkdir(parents=True)
         os.chown(results, 10001, 10001)
         task = {
             "task_id": task_id, "status": "starting", "created_at": _now(),
             "user_id": user_id, "conversation_id": conversation_id, "turn_id": turn_id,
+            "skills": task_skills,
         }
         _write_task(task)
         return task
@@ -421,6 +429,9 @@ def _run_task(task_id: str) -> None:
                 str(HOST_DATA_DIR / "tasks" / task_id / "job"): {"bind": "/job", "mode": "ro"},
                 str(HOST_DATA_DIR / "results" / task_id): {"bind": "/results", "mode": "rw"},
                 str(host_mirror): {"bind": "/cache/repository.git", "mode": "ro"},
+                str(HOST_DATA_DIR / "tasks" / task_id / "skills"): {
+                    "bind": "/home/codex/.agents/skills", "mode": "ro"
+                },
             },
             labels={"codex.mvp.managed": "true", "codex.mvp.task_id": task_id},
             mem_limit="2g",
@@ -463,6 +474,8 @@ def _run_task(task_id: str) -> None:
                 task["cleanup_error"] = type(exc).__name__
         task["finished_at"] = _now()
         _write_task(task)
+        if "cleanup_error" not in task:
+            shutil.rmtree(TASK_DIR / task_id / "skills", ignore_errors=True)
         try:
             _sync_turn_from_task(task)
         except Exception as exc:
@@ -499,6 +512,56 @@ async def capacity() -> dict[str, int]:
 @app.get("/v1/me")
 async def current_user(request: Request) -> dict:
     return {"user_id": _user_id(request)}
+
+
+def _public_skills_dir() -> Path:
+    public_root = DATA_DIR / "skills" / "public"
+    skill_store.seed_public(SKILL_BUNDLE_DIR, public_root)
+    return public_root
+
+
+@app.get("/v1/skills/catalog")
+async def list_skill_catalog(request: Request) -> dict:
+    user_id = _user_id(request)
+    with _skill_lock:
+        public = skill_store.list_skills(_public_skills_dir())
+        installed = {item["id"] for item in skill_store.list_skills(skill_store.user_dir(DATA_DIR, user_id))}
+    return {"items": [{**item, "installed": item["id"] in installed} for item in public]}
+
+
+@app.get("/v1/skills")
+async def list_user_skills(request: Request) -> dict:
+    user_id = _user_id(request)
+    with _skill_lock:
+        items = skill_store.list_skills(skill_store.user_dir(DATA_DIR, user_id))
+        labels = {item["id"]: item for item in skill_store.list_skills(_public_skills_dir())}
+    return {"items": [{**item, **labels.get(item["id"], {})} for item in items]}
+
+
+@app.post("/v1/skills/{skill_id}/install")
+async def install_skill(skill_id: str, request: Request) -> dict:
+    user_id = _user_id(request)
+    with _skill_lock:
+        try:
+            skill_store.install(_public_skills_dir(), skill_store.user_dir(DATA_DIR, user_id), skill_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="skill not found") from exc
+        except OverflowError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"id": skill_id, "installed": True}
+
+
+@app.delete("/v1/skills/{skill_id}")
+async def uninstall_skill(skill_id: str, request: Request) -> dict:
+    user_id = _user_id(request)
+    with _skill_lock:
+        try:
+            removed = skill_store.uninstall(skill_store.user_dir(DATA_DIR, user_id), skill_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="skill not found") from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="skill not installed")
+    return {"id": skill_id, "installed": False}
 
 
 @app.post("/v1/conversations", status_code=status.HTTP_201_CREATED)
@@ -713,6 +776,7 @@ async def get_task_result(task_id: str, request: Request):
             "cache_hit": task.get("cache_hit"),
             "cache_refreshed": task.get("cache_refreshed"),
         },
+        "skills": task.get("skills", []),
         "timings_ms": {
             "total": total_ms,
             "cache_prepare": (

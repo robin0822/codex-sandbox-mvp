@@ -27,6 +27,8 @@ class FakeApi(BaseHTTPRequestHandler):
                 self._json(401, {"detail": "API key required"})
         elif self.path.startswith("/v1/conversations"):
             self._json(200, {"items": [], "has_more": False})
+        elif self.path == "/v1/skills/catalog":
+            self._json(200, {"items": [{"id": "awesome-api-design", "installed": False}]})
         elif self.path == "/v1/tasks/abc/events":
             type(self).last_event_id = self.headers.get("Last-Event-ID")
             type(self).authorization = self.headers.get("Authorization")
@@ -41,9 +43,14 @@ class FakeApi(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        type(self).received = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        type(self).received = json.loads(body) if body else None
         type(self).authorization = self.headers.get("Authorization")
         self._json(201 if self.path == "/v1/conversations" else 202, {"task_id": "abc"})
+
+    def do_DELETE(self):
+        type(self).authorization = self.headers.get("Authorization")
+        self._json(200, {"id": "awesome-api-design", "installed": False})
 
     def _json(self, code, payload):
         data = json.dumps(payload).encode()
@@ -146,6 +153,14 @@ class LocalPreviewTest(unittest.TestCase):
         with urlopen(events) as streamed:
             self.assertIn("event: task.completed", streamed.read().decode())
         self.assertEqual(FakeApi.authorization, "Bearer alice-key")
+
+    def test_skill_marketplace_routes_include_install_and_delete(self):
+        with urlopen(self.base + "/v1/skills/catalog") as response:
+            self.assertEqual(json.load(response)["items"][0]["id"], "awesome-api-design")
+        with urlopen(Request(self.base + "/v1/skills/awesome-api-design/install", data=b"", method="POST")) as response:
+            self.assertEqual(response.status, 202)
+        with urlopen(Request(self.base + "/v1/skills/awesome-api-design", method="DELETE")) as response:
+            self.assertFalse(json.load(response)["installed"])
 
 
 if __name__ == "__main__":

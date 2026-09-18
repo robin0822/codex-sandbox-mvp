@@ -86,6 +86,10 @@ class TaskLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(self.docker.options["environment"]["MODEL_API_KEY"], "test-key")
         self.assertEqual(
+            self.docker.options["volumes"][str(self.root / "tasks" / task_id / "skills")],
+            {"bind": "/home/codex/.agents/skills", "mode": "ro"},
+        )
+        self.assertEqual(
             self.docker.options["volumes"][str(self.root / "repo-cache" / "mirror.git")]["mode"],
             "ro",
         )

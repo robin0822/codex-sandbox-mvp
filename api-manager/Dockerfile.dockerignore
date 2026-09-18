@@ -1,0 +1,10 @@
+.git
+.github
+.env
+data
+vendor
+web
+runner
+api-manager/tests
+**/__pycache__
+**/*.pyc

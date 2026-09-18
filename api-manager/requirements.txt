@@ -4,3 +4,4 @@ docker>=7.1,<8
 aiofiles>=24,<25
 SQLAlchemy>=2.0,<3
 psycopg[binary]>=3.2,<4
+PyYAML>=6,<7

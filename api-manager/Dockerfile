@@ -9,12 +9,13 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
+COPY api-manager/requirements.txt /app/requirements.txt
 
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r /app/requirements.txt
 
-COPY app/ /app/app/
+COPY api-manager/app/ /app/app/
+COPY skill-catalog/public/ /app/bundled-skills/
 
 RUN mkdir -p /data/tasks /data/results /data/logs
 

@@ -52,7 +52,7 @@ RUN chmod +x \
       /usr/local/bin/runner-wait \
       /usr/local/bin/run-codex-task \
     && useradd --create-home --uid 10001 codex \
-    && mkdir -p /job /workspace /results /home/codex/.codex \
+    && mkdir -p /job /workspace /results /home/codex/.codex /home/codex/.agents/skills \
     && cp /opt/codex/config.toml /home/codex/.codex/config.toml \
     && chown -R codex:codex /job /workspace /results /home/codex
 
@@ -61,4 +61,3 @@ WORKDIR /workspace
 ENV CODEX_HOME=/home/codex/.codex
 
 ENTRYPOINT ["/usr/local/bin/runner-wait"]
-

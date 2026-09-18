@@ -25,7 +25,7 @@ jobs:
       matrix:
         include:
           - image: codex-api-manager
-            context: ./api-manager
+            context: .
             dockerfile: ./api-manager/Dockerfile
             cache_scope: api-manager
           - image: codex-runner

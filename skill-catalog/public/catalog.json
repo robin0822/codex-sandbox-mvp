@@ -1,0 +1,7 @@
+{
+  "awesome-bug-fix": {"display_name": "故障排查", "category": "开发", "summary": "复现问题、追踪根因并验证修复。"},
+  "awesome-code-review": {"display_name": "代码审查", "category": "开发", "summary": "按影响和证据审查代码变更。"},
+  "awesome-api-design": {"display_name": "API 设计", "category": "设计", "summary": "规划 HTTP 接口、资源、分页和重试契约。"},
+  "awesome-design-doc": {"display_name": "设计文档", "category": "设计", "summary": "把需求、取舍和迁移路径整理成可执行的设计文档。"},
+  "awesome-document-style": {"display_name": "Markdown 编辑", "category": "文档", "summary": "改善 Markdown 文档的清晰度、准确性和可读性。"}
+}
