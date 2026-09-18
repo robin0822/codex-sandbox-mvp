@@ -689,6 +689,7 @@ async function openDetails(turn) {
       ["任务 ID", turn.task_id],
       ["仓库", state.activeConversation.repository.url],
       ["本轮可用技能", result.skills?.length ? result.skills.join("、") : "无"],
+      ["本轮显式指定", result.requested_skills?.length ? result.requested_skills.join("、") : "无"],
       ["已验证读取或注入", result.loaded_skills?.length ? result.loaded_skills.join("、") : "无记录"],
       ["缓存", result.repository?.cache_hit ? "已命中" : "首次创建"],
       ["总耗时", formatMs(result.timings_ms?.total)],

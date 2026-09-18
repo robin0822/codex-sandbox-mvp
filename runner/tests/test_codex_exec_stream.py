@@ -63,6 +63,32 @@ class CodexExecStreamTest(unittest.TestCase):
                                        "source": "command_output"}])
             self.assertEqual(json.loads((root / "loaded-skills.json").read_text()), ["awesome-api-design"])
 
+    def test_reports_explicit_skill_only_when_full_document_is_in_prompt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            skill = root / "skills" / "awesome-api-design"
+            skill.mkdir(parents=True)
+            document = "---\nname: awesome-api-design\n---\n# API Design\nRead every rule.\n"
+            (skill / "SKILL.md").write_text(document)
+            explicit = root / "explicit-skills.json"
+            explicit.write_text('["awesome-api-design"]')
+            prompt = root / "prompt.txt"
+            prompt.write_text("Use this skill:\n" + document + "\nQuestion")
+            code = "print('{\"type\":\"thread.started\"}', flush=True)"
+            exit_code = stream.run([sys.executable, "-c", code], root / "codex-events.jsonl",
+                                   root / "codex-stderr.log", root / "skills", explicit, prompt)
+            self.assertEqual(exit_code, 0)
+            events = [json.loads(line) for line in (root / "codex-events.jsonl").read_text().splitlines()]
+            self.assertEqual(events[0], {"type": "skill.loaded", "skill_id": "awesome-api-design",
+                                         "source": "explicit_prompt"})
+            self.assertEqual(json.loads((root / "loaded-skills.json").read_text()), ["awesome-api-design"])
+
+            prompt.write_text("Use this skill:\n" + document[:24])
+            stream.run([sys.executable, "-c", code], root / "codex-events.jsonl",
+                       root / "codex-stderr.log", root / "skills", explicit, prompt)
+            events = [json.loads(line) for line in (root / "codex-events.jsonl").read_text().splitlines()]
+            self.assertFalse(any(event["type"] == "skill.loaded" for event in events))
+
 
 if __name__ == "__main__":
     unittest.main()

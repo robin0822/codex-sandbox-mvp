@@ -215,6 +215,11 @@ def _loaded_skills(result_dir: Path, available: list[str]) -> list[str]:
     return [name for name in available if name in reported]
 
 
+def _explicit_skills(message: str, available: list[str]) -> list[str]:
+    mentioned = set(re.findall(r"(?<![A-Za-z0-9_])\$([a-z][a-z0-9-]{0,63})\b", message))
+    return [name for name in available if name in mentioned]
+
+
 def _write_task(task: dict) -> None:
     path = _task_file(task["task_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,7 +236,8 @@ def _active_count() -> int:
 
 
 def _create_task_files(repository: Repository, prompt: str, user_id: str,
-                       conversation_id: str | None = None, turn_id: str | None = None) -> dict:
+                       conversation_id: str | None = None, turn_id: str | None = None,
+                       current_message: str | None = None) -> dict:
     """Caller holds _lock; both one-shot and conversational tasks use this path."""
     if not RUNNER_IMAGE or not os.environ.get("MODEL_API_KEY"):
         raise HTTPException(status_code=503, detail="Runner image or model key is missing")
@@ -244,18 +250,28 @@ def _create_task_files(repository: Repository, prompt: str, user_id: str,
         (job_dir / "repository-url.txt").write_text(repository.url, encoding="utf-8")
         (job_dir / "repository-ref.txt").write_text(repository.ref, encoding="utf-8")
         (job_dir / "repository-refresh.txt").write_text("1" if repository.refresh else "0", encoding="utf-8")
-        (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         with _skill_lock:
             task_skills = skill_store.snapshot(
                 skill_store.user_dir(DATA_DIR, user_id), TASK_DIR / task_id / "skills"
             )
+        requested_skills = _explicit_skills(current_message or prompt, task_skills)
+        if requested_skills:
+            instructions = ["当前问题显式指定了以下 Skill。请按其完整说明处理当前问题。\n\n"]
+            for skill_id in requested_skills:
+                document = (TASK_DIR / task_id / "skills" / skill_id / "SKILL.md").read_text(encoding="utf-8")
+                instructions.append(f"### ${skill_id} / SKILL.md\n{document}\n\n")
+            prompt = "".join(instructions) + "---\n\n" + prompt
+        (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        (job_dir / "explicit-skills.json").write_text(
+            json.dumps(requested_skills, ensure_ascii=False), encoding="utf-8"
+        )
         results = RESULT_DIR / task_id
         results.mkdir(parents=True)
         os.chown(results, 10001, 10001)
         task = {
             "task_id": task_id, "status": "starting", "created_at": _now(),
             "user_id": user_id, "conversation_id": conversation_id, "turn_id": turn_id,
-            "skills": task_skills,
+            "skills": task_skills, "requested_skills": requested_skills,
         }
         _write_task(task)
         return task
@@ -695,7 +711,8 @@ async def create_turn(conversation_id: str, body: TurnRequest, request: Request,
                 repository = Repository(url=conversation.repository_url,
                                         ref=conversation.repository_ref,
                                         refresh=conversation.repository_refresh)
-                task = _create_task_files(repository, prompt, user_id, conversation_id, turn_id)
+                task = _create_task_files(repository, prompt, user_id, conversation_id, turn_id,
+                                          current_message=message)
                 db.add(Turn(
                     id=turn_id, conversation_id=conversation_id, sequence=next_sequence,
                     request_id=body.request_id, user_message=message, task_id=task["task_id"],
@@ -787,6 +804,7 @@ async def get_task_result(task_id: str, request: Request):
             "cache_refreshed": task.get("cache_refreshed"),
         },
         "skills": task.get("skills", []),
+        "requested_skills": task.get("requested_skills", []),
         "loaded_skills": _loaded_skills(result_dir, task.get("skills", [])),
         "timings_ms": {
             "total": total_ms,

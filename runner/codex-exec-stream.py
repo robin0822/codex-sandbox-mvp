@@ -12,6 +12,8 @@ from pathlib import Path
 EVENTS = Path("/results/codex-events.jsonl")
 STDERR = Path("/results/codex-stderr.log")
 SKILLS = Path("/home/codex/.agents/skills")
+EXPLICIT_SKILLS = Path("/job/explicit-skills.json")
+PROMPT = Path("/job/prompt.txt")
 MARKER = "CODEX_MVP_SKILL_LOADED\t"
 SKILL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
@@ -44,14 +46,36 @@ def _skills_read_by_command(line: bytes, skills_root: Path,
             if doc and str(skills_root / skill_id / "SKILL.md") in command and doc in output]
 
 
+def _skills_in_prompt(explicit_path: Path, prompt_path: Path,
+                      docs: dict[str, str]) -> list[str]:
+    try:
+        requested = json.loads(explicit_path.read_text(encoding="utf-8"))
+        prompt = prompt_path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    if not isinstance(requested, list):
+        return []
+    return [skill_id for skill_id in dict.fromkeys(
+                skill_id for skill_id in requested if isinstance(skill_id, str))
+            if skill_id in docs
+            and docs[skill_id] and docs[skill_id] in prompt]
+
+
 def run(command: list[str], events_path: Path = EVENTS, stderr_path: Path = STDERR,
-        skills_root: Path = SKILLS) -> int:
+        skills_root: Path = SKILLS, explicit_path: Path = EXPLICIT_SKILLS,
+        prompt_path: Path = PROMPT) -> int:
     lock = threading.Lock()
     loaded = set()
     skill_docs = _read_skill_docs(skills_root)
     with events_path.open("wb") as events, stderr_path.open("wb") as errors:
         process = subprocess.Popen(command, stdin=sys.stdin.buffer, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)
+        for skill_id in _skills_in_prompt(explicit_path, prompt_path, skill_docs):
+            loaded.add(skill_id)
+            event = {"type": "skill.loaded", "skill_id": skill_id,
+                     "source": "explicit_prompt"}
+            events.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
+        events.flush()
 
         def copy_stdout() -> None:
             for line in process.stdout:

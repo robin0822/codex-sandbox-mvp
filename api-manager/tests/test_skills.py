@@ -76,6 +76,9 @@ class SkillMarketplaceTest(unittest.TestCase):
         snapshot = self.root / "tasks" / task_id / "skills" / "awesome-code-review"
         self.assertTrue((snapshot / "SKILL.md").is_file())
         self.assertTrue((snapshot / "references" / "smell-baseline.md").is_file())
+        job = self.root / "tasks" / task_id / "job"
+        self.assertEqual(json.loads((job / "explicit-skills.json").read_text()), ["awesome-code-review"])
+        self.assertIn((snapshot / "SKILL.md").read_text().strip(), (job / "prompt.txt").read_text())
         self.assertEqual(self.client.get(f"/v1/tasks/{task_id}", headers=self.alice).json()["skills"],
                          ["awesome-code-review"])
         self.client.delete("/v1/skills/awesome-code-review", headers=self.alice)
@@ -87,6 +90,12 @@ class SkillMarketplaceTest(unittest.TestCase):
             })
         self.assertEqual(bob_task.status_code, 202)
         self.assertEqual(self.client.get(f"/v1/tasks/{bob_task.json()['task_id']}", headers=self.bob).json()["skills"], [])
+
+    def test_skill_mentions_in_history_do_not_activate_current_turn(self):
+        self.assertEqual(main._explicit_skills("新问题没有技能调用", ["awesome-api-design"]), [])
+        self.assertEqual(main._explicit_skills("请用 $awesome-api-design 设计接口", ["awesome-api-design"]),
+                         ["awesome-api-design"])
+        self.assertEqual(main._explicit_skills("请用 $awesome-api-design 设计接口", []), [])
 
     def test_administrator_removal_from_public_is_not_reseeded(self):
         self.client.get("/v1/skills/catalog", headers=self.alice)
