@@ -139,6 +139,14 @@ class ConversationTest(unittest.TestCase):
         self.assertLess(response.json()["context_rounds_used"], 2)
         self.assertIn("第三轮", self.prompts[-1])
 
+    def test_historical_skill_mentions_cannot_select_current_skill(self):
+        conversation_id = self.create_conversation()
+        self.assertEqual(self.post_turn(conversation_id, "请用 $awesome-api-design 分析").status_code, 202)
+        self.assertIn("$awesome-api-design", self.prompts[-1])
+        self.assertEqual(self.post_turn(conversation_id, "现在只总结上一轮").status_code, 202)
+        self.assertIn("＄awesome-api-design", self.prompts[-1])
+        self.assertNotIn("$awesome-api-design", self.prompts[-1])
+
     def test_same_window_rejects_overlapping_turns(self):
         conversation_id = self.create_conversation()
         with patch.object(main, "_run_task", lambda _task_id: None):

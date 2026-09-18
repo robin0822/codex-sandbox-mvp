@@ -1,8 +1,20 @@
 --- a/ext/skills/src/extension.rs
 +++ b/ext/skills/src/extension.rs
-@@ -486,6 +486,7 @@
+@@ -497,6 +497,7 @@
+                                 }),
                          };
                          fragments.push(Box::new(fragment));
 +                        eprintln!("CODEX_MVP_SKILL_LOADED\t{}", entry.name);
                          main_prompts_injected = true;
                          if entry.authority.kind == SkillSourceKind::Host {
+                             injected_host_skill_prompts.insert_path(entry.main_prompt.as_str());
+--- a/ext/skills/src/host_prompt.rs
++++ b/ext/skills/src/host_prompt.rs
+@@ -94,6 +94,7 @@
+                         resource_access: None,
+                     }));
+                     prompts.injected.push(skill.clone());
++                    eprintln!("CODEX_MVP_SKILL_LOADED\t{}", skill.name);
+                 }
+                 Err(err) => {
+                     prompts.warnings.push(format!(

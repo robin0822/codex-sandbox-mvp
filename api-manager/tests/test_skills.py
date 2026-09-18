@@ -77,8 +77,11 @@ class SkillMarketplaceTest(unittest.TestCase):
         self.assertTrue((snapshot / "SKILL.md").is_file())
         self.assertTrue((snapshot / "references" / "smell-baseline.md").is_file())
         job = self.root / "tasks" / task_id / "job"
-        self.assertEqual(json.loads((job / "explicit-skills.json").read_text()), ["awesome-code-review"])
-        self.assertIn((snapshot / "SKILL.md").read_text().strip(), (job / "prompt.txt").read_text())
+        self.assertEqual((job / "prompt.txt").read_text(), "$awesome-code-review review")
+        self.assertFalse((job / "explicit-skills.json").exists())
+        self.assertNotIn((snapshot / "SKILL.md").read_text().strip(), (job / "prompt.txt").read_text())
+        self.assertEqual(self.client.get(f"/v1/tasks/{task_id}", headers=self.alice).json()["requested_skills"],
+                         ["awesome-code-review"])
         self.assertEqual(self.client.get(f"/v1/tasks/{task_id}", headers=self.alice).json()["skills"],
                          ["awesome-code-review"])
         self.client.delete("/v1/skills/awesome-code-review", headers=self.alice)

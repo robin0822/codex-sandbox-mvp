@@ -327,11 +327,12 @@ function describeEvent(event) {
     return { title: "执行出错", desc: String(event.error?.message || event.message || type), kind: "error" };
   }
   if (type === "skill.loaded") {
-    const description = event.source === "command_output"
-      ? `Codex 已读取 $${event.skill_id} 的完整技能说明`
-      : `$${event.skill_id} 的技能说明已注入本轮上下文`;
-    return { title: "技能说明已加载", desc: description,
+    return { title: "Codex 已加载技能", desc: `$${event.skill_id} 的技能说明已加入本轮上下文`,
       kind: "skill", skillId: event.skill_id };
+  }
+  if (type === "skill.read") {
+    return { title: "已读取技能文件", desc: `Codex 已通过命令读取 $${event.skill_id} 的 SKILL.md`,
+      kind: "normal", skillId: event.skill_id };
   }
   if (type.startsWith("item.") && item.type === "reasoning") {
     return { title: "推理摘要", desc: item.text || "", kind: "reasoning" };
@@ -690,7 +691,8 @@ async function openDetails(turn) {
       ["仓库", state.activeConversation.repository.url],
       ["本轮可用技能", result.skills?.length ? result.skills.join("、") : "无"],
       ["本轮显式指定", result.requested_skills?.length ? result.requested_skills.join("、") : "无"],
-      ["已验证读取或注入", result.loaded_skills?.length ? result.loaded_skills.join("、") : "无记录"],
+      ["Codex 原生加载", result.loaded_skills?.length ? result.loaded_skills.join("、") : "无记录"],
+      ["命令读取技能文件", result.read_skills?.length ? result.read_skills.join("、") : "无记录"],
       ["缓存", result.repository?.cache_hit ? "已命中" : "首次创建"],
       ["总耗时", formatMs(result.timings_ms?.total)],
       ["Codex 执行", formatMs(result.timings_ms?.codex)],

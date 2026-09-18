@@ -160,7 +160,11 @@ def _render_prompt(message: str, recent_turns: list[Turn]) -> tuple[str, int]:
     selected = []
     available = MAX_HISTORY_BYTES - len((header + current).encode("utf-8"))
     for turn in reversed(recent_turns):
-        block = f"第 {turn.sequence} 轮用户：\n{turn.user_message}\n第 {turn.sequence} 轮助手：\n{turn.assistant_message}\n\n"
+        # Codex scans all UserInput::Text for $skill mentions. Historical mentions
+        # are context, not selections for the current turn.
+        historical_user = re.sub(r"(?<![A-Za-z0-9_])\$([a-z][a-z0-9-]{0,63})\b", r"＄\1", turn.user_message)
+        historical_assistant = re.sub(r"(?<![A-Za-z0-9_])\$([a-z][a-z0-9-]{0,63})\b", r"＄\1", turn.assistant_message or "")
+        block = f"第 {turn.sequence} 轮用户：\n{historical_user}\n第 {turn.sequence} 轮助手：\n{historical_assistant}\n\n"
         size = len(block.encode("utf-8"))
         if size > available:
             break
@@ -205,14 +209,22 @@ def _optional_int(path: Path) -> int | None:
         return None
 
 
-def _loaded_skills(result_dir: Path, available: list[str]) -> list[str]:
+def _reported_skills(result_dir: Path, filename: str, available: list[str]) -> list[str]:
     try:
-        reported = json.loads((result_dir / "loaded-skills.json").read_text(encoding="utf-8"))
+        reported = json.loads((result_dir / filename).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(reported, list):
         return []
     return [name for name in available if name in reported]
+
+
+def _loaded_skills(result_dir: Path, available: list[str]) -> list[str]:
+    return _reported_skills(result_dir, "loaded-skills.json", available)
+
+
+def _read_skills(result_dir: Path, available: list[str]) -> list[str]:
+    return _reported_skills(result_dir, "read-skills.json", available)
 
 
 def _explicit_skills(message: str, available: list[str]) -> list[str]:
@@ -255,16 +267,7 @@ def _create_task_files(repository: Repository, prompt: str, user_id: str,
                 skill_store.user_dir(DATA_DIR, user_id), TASK_DIR / task_id / "skills"
             )
         requested_skills = _explicit_skills(current_message or prompt, task_skills)
-        if requested_skills:
-            instructions = ["当前问题显式指定了以下 Skill。请按其完整说明处理当前问题。\n\n"]
-            for skill_id in requested_skills:
-                document = (TASK_DIR / task_id / "skills" / skill_id / "SKILL.md").read_text(encoding="utf-8")
-                instructions.append(f"### ${skill_id} / SKILL.md\n{document}\n\n")
-            prompt = "".join(instructions) + "---\n\n" + prompt
         (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-        (job_dir / "explicit-skills.json").write_text(
-            json.dumps(requested_skills, ensure_ascii=False), encoding="utf-8"
-        )
         results = RESULT_DIR / task_id
         results.mkdir(parents=True)
         os.chown(results, 10001, 10001)
@@ -806,6 +809,7 @@ async def get_task_result(task_id: str, request: Request):
         "skills": task.get("skills", []),
         "requested_skills": task.get("requested_skills", []),
         "loaded_skills": _loaded_skills(result_dir, task.get("skills", [])),
+        "read_skills": _read_skills(result_dir, task.get("skills", [])),
         "timings_ms": {
             "total": total_ms,
             "cache_prepare": (
