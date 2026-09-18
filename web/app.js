@@ -289,6 +289,23 @@ function node(tag, className, text) {
   return element;
 }
 
+const markdown = typeof window.markdownit === "function"
+  ? window.markdownit({ html: false, linkify: true, breaks: true }) : null;
+
+function markdownNode(text, className) {
+  const element = node("div", className + " markdown-body");
+  if (!markdown || !window.DOMPurify) {
+    element.textContent = text;
+    return element;
+  }
+  element.innerHTML = window.DOMPurify.sanitize(markdown.render(text), { USE_PROFILES: { html: true } });
+  for (const link of element.querySelectorAll("a[href]")) {
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+  }
+  return element;
+}
+
 function describeEvent(event) {
   const type = event?.type || "unknown";
   const item = event.item || {};
@@ -300,13 +317,21 @@ function describeEvent(event) {
     return {
       title: "本轮执行完毕",
       desc: usage.input_tokens || usage.output_tokens
-        ? "输入 " + (usage.input_tokens ?? "—") + " · 输出 " + (usage.output_tokens ?? "—") + " tokens"
+        ? "输入 " + (usage.input_tokens ?? "—") + " · 输出 " + (usage.output_tokens ?? "—")
+          + " · 推理 " + (usage.reasoning_output_tokens ?? "—") + " tokens"
         : "正在整理最终结果",
       kind: "message",
     };
   }
   if (type === "error" || type === "turn.failed") {
     return { title: "执行出错", desc: String(event.error?.message || event.message || type), kind: "error" };
+  }
+  if (type === "skill.loaded") {
+    return { title: "技能已加载", desc: `$${event.skill_id} 的指令已加入本轮上下文`,
+      kind: "skill", skillId: event.skill_id };
+  }
+  if (type.startsWith("item.") && item.type === "reasoning") {
+    return { title: "推理摘要", desc: item.text || "", kind: "reasoning" };
   }
   if (type.startsWith("item.") && item.type === "command_execution") {
     return {
@@ -322,6 +347,18 @@ function describeEvent(event) {
   if (type.startsWith("item.") && item.type === "file_change") {
     return { title: "文件发生变更", desc: (item.changes || []).map((change) => change.path).join("、"), kind: "command" };
   }
+  if (type.startsWith("item.") && item.type === "error") {
+    return { title: "运行提示", desc: item.message || "", kind: "error" };
+  }
+  if (type.startsWith("item.") && item.type === "mcp_tool_call") {
+    return { title: "调用 MCP 工具", desc: `${item.server || ""} / ${item.tool || ""}`, kind: "command" };
+  }
+  if (type.startsWith("item.") && item.type === "web_search") {
+    return { title: "联网搜索", desc: JSON.stringify(item.action || {}), kind: "command" };
+  }
+  if (type.startsWith("item.") && item.type === "todo_list") {
+    return { title: "执行计划", desc: (item.items || []).map((step) => `${step.completed ? "✓" : "○"} ${step.text}`).join("\n"), kind: "normal" };
+  }
   return { title: "事件 · " + type, desc: item.type || event.message || "", kind: "normal" };
 }
 
@@ -329,7 +366,8 @@ function renderEvent(item, parent) {
   const row = node("div", "event-item " + item.kind);
   const dot = node("span", "event-dot");
   const body = node("div");
-  body.append(node("div", "event-title", item.title), node("div", "event-desc", item.desc));
+  body.append(node("div", "event-title", item.title), item.kind === "reasoning"
+    ? markdownNode(item.desc, "event-desc") : node("div", "event-desc", item.desc));
   if (item.output) body.append(node("pre", "event-output", String(item.output).slice(0, 8000)));
   if (item.raw) {
     const details = node("details", "event-raw");
@@ -346,21 +384,19 @@ function addEvent(turn, event, envelope = null) {
   const item = {
     ...detail, time: envelope?.timestamp || new Date().toISOString(),
     raw: envelope ? JSON.stringify(envelope, null, 2).slice(0, 12000) : "",
+    itemId: event.item?.id || null,
   };
   turn.events ||= [];
-  turn.events.push(item);
+  const existing = item.itemId ? turn.events.findIndex((entry) => entry.itemId === item.itemId) : -1;
+  if (existing >= 0) turn.events[existing] = item;
+  else turn.events.push(item);
   turn.events = turn.events.slice(-100);
-  const list = document.querySelector('[data-turn-id="' + turn.id + '"] .event-list');
-  if (!list && state.turns.includes(turn)) {
+  const article = document.querySelector('[data-turn-id="' + turn.id + '"]');
+  const card = article?.querySelector(".progress-card");
+  if (!card && state.turns.includes(turn)) {
     turn.progressOpen = true;
     renderTurns(false);
-  } else if (list) {
-    renderEvent(item, list);
-    const count = document.querySelector('[data-turn-id="' + turn.id + '"] .event-count');
-    if (count) count.textContent = turn.events.length + " 条事件";
-    const note = document.querySelector('[data-turn-id="' + turn.id + '"] .stream-note');
-    if (note) note.classList.add("hidden");
-  }
+  } else if (card) card.replaceWith(renderProgress(turn));
 }
 
 function renderProgress(turn) {
@@ -376,10 +412,22 @@ function renderProgress(turn) {
   const chevron = node("span", "chevron", expanded ? "⌃" : "⌄");
   heading.append(left, chevron);
   const content = node("div", "progress-content" + (expanded ? "" : " hidden"));
+  content.append(node("div", "progress-section-label", "推理摘要"));
+  const reasoning = (turn.events || []).filter((event) => event.kind === "reasoning");
+  if (reasoning.length) {
+    const summaries = node("div", "reasoning-list");
+    for (const event of reasoning) renderEvent(event, summaries);
+    content.append(summaries);
+  } else {
+    const completed = (turn.events || []).some((event) => event.title === "本轮执行完毕");
+    content.append(node("p", "reasoning-empty", completed
+      ? "本次模型未提供可展示的推理摘要。" : "等待模型返回可展示的推理摘要…"));
+  }
+  content.append(node("div", "progress-section-label", "执行进度"));
   const eventList = node("div", "event-list");
   eventList.setAttribute("role", "log");
   eventList.setAttribute("aria-live", "polite");
-  for (const event of turn.events || []) renderEvent(event, eventList);
+  for (const event of turn.events || []) if (event.kind !== "reasoning") renderEvent(event, eventList);
   content.append(eventList, node("div", "stream-note" + (turn.events?.length ? " hidden" : ""), "任务事件会实时出现在这里。"));
   heading.addEventListener("click", () => {
     const isOpen = heading.getAttribute("aria-expanded") === "true";
@@ -407,6 +455,9 @@ function renderTurn(turn) {
     : turn.status === "failed" ? "执行失败" : "正在工作";
   name.append(node("span", "assistant-state " + (turn.status === "succeeded" ? "success" : ["failed", "timed_out"].includes(turn.status) ? "error" : ""), status));
   body.append(name);
+  const loaded = turn.result?.loaded_skills?.length ? turn.result.loaded_skills
+    : (turn.events || []).filter((event) => event.kind === "skill").map((event) => event.skillId);
+  if (loaded.length) body.append(node("div", "skill-usage", "已验证加载 " + loaded.map((id) => "$" + id).join("、")));
   if (turn.status === "starting" || turn.status === "running") {
     body.append(renderProgress(turn));
   } else {
@@ -414,7 +465,7 @@ function renderTurn(turn) {
     const answer = turn.assistant_message || (turn.status === "succeeded" ? "任务没有返回最终回答。"
       : turn.status === "timed_out" ? "任务执行超时，已自动停止。点击执行详情查看过程。"
       : "任务执行失败，点击执行详情查看结果。");
-    body.append(node("div", "answer", answer));
+    body.append(markdownNode(answer, "answer"));
     const actions = node("div", "answer-actions");
     const copy = node("button", null, "⧉ 复制回答");
     copy.type = "button";
@@ -633,6 +684,8 @@ async function openDetails(turn) {
       ["状态", result.status === "succeeded" ? "已完成" : result.status === "timed_out" ? "执行超时" : result.status || "失败"],
       ["任务 ID", turn.task_id],
       ["仓库", state.activeConversation.repository.url],
+      ["本轮可用技能", result.skills?.length ? result.skills.join("、") : "无"],
+      ["已验证加载", result.loaded_skills?.length ? result.loaded_skills.join("、") : "无记录"],
       ["缓存", result.repository?.cache_hit ? "已命中" : "首次创建"],
       ["总耗时", formatMs(result.timings_ms?.total)],
       ["Codex 执行", formatMs(result.timings_ms?.codex)],

@@ -15,6 +15,7 @@ ghcr.io/<owner>/codex-runner:latest
 ```
 
 Codex 源码通过 `vendor/codex` Git Submodule 固定到具体提交。
+Runner 构建时应用 [skill-loaded.patch](runner/patches/skill-loaded.patch)，在 Codex 确实把 Skill 指令加入本轮上下文后发出可核验的运行时标记。前端内置 `markdown-it` 15.0.2 与 `DOMPurify` 3.4.15，许可文件位于 `web/vendor/` 对应目录。
 
 ## 本地配置
 
@@ -45,7 +46,7 @@ API Manager 首次启动时把仓库 [skill-catalog/public](skill-catalog/public
 | `POST /v1/skills/{skill-id}/install` | 从公共目录复制到当前用户目录；重复安装保持原副本 |
 | `DELETE /v1/skills/{skill-id}` | 删除当前用户目录中的 Skill，不影响公共目录或其他用户 |
 
-例如，当前用户安装后可在前端选择“用于提问”，输入框会填入 `$awesome-code-review`。不显式指定时，Codex 也可以根据 Skill 描述选择。创建任务时，Manager 把该用户当时已安装的 Skill 复制为任务快照，只读挂载到 Runner 的 `/home/codex/.agents/skills`；任务结束后清理快照。这样安装或卸载只影响之后创建的任务。任务状态和结果中记录本次加载的 Skill ID。每位用户最多安装 20 项，每项最大 1 MB；所有公共 Skill 须由管理员先检查内容和依赖。
+例如，当前用户安装后可在前端选择“用于提问”，输入框会填入 `$awesome-code-review`。不显式指定时，Codex 也可以根据 Skill 描述选择。创建任务时，Manager 把该用户当时已安装的 Skill 复制为任务快照，只读挂载到 Runner 的 `/home/codex/.agents/skills`；任务结束后清理快照。这样安装或卸载只影响之后创建的任务。任务状态和结果的 `skills` 表示**本轮可用**的 Skill；Runner 内的 Codex 成功读取指令并加入模型上下文时，才会发出 `skill.loaded` 事件，结果的 `loaded_skills` 表示**已验证加载**的 Skill。这能验证选择与加载，不等同于保证模型完全遵循每条指令。每位用户最多安装 20 项，每项最大 1 MB；所有公共 Skill 须由管理员先检查内容和依赖。
 
 修改公共目录里的 Skill 不需要重新构建镜像，但已安装的用户副本不会自动更新；需要用户卸载后重新安装。若要更新仓库附带的首批公共 Skill，需要更新仓库并重新构建 API Manager 镜像，再由管理员决定如何更新服务器上的公共目录。
 
@@ -78,7 +79,7 @@ API Manager 首次启动时把仓库 [skill-catalog/public](skill-catalog/public
 python3 web/server.py
 ```
 
-打开 <http://127.0.0.1:5173>。左侧从服务端加载用户的对话窗口；打开窗口后分页读取完整历史，中间显示多轮提问与回答，运行时实时展示 SSE 事件，右侧可查看每轮代码变更。刷新会恢复当前窗口及其历史。新对话在第一次提问时创建；仓库设置在该窗口内固定。技能广场支持查看、安装、卸载和插入显式 Skill 调用；MCP 与知识库仍是预留入口。页面提交时只发送当前问题，最近五轮上下文由 API Manager 从数据库读取。
+打开 <http://127.0.0.1:5173>。左侧从服务端加载用户的对话窗口；打开窗口后分页读取完整历史，中间显示多轮提问与回答，运行时把可读推理摘要与命令、工具、Skill 加载等执行事件分区展示，右侧可查看每轮代码变更。模型未返回摘要时页面明确显示“未提供”，不会编造内部推理。回答和推理摘要使用随页面一起提供的 Markdown 渲染器，并清理不安全的 HTML；不依赖外部 CDN。刷新会恢复当前窗口及其历史。新对话在第一次提问时创建；仓库设置在该窗口内固定。技能广场支持查看、安装、卸载和插入显式 Skill 调用；MCP 与知识库仍是预留入口。页面提交时只发送当前问题，最近五轮上下文由 API Manager 从数据库读取。
 
 如果 API Manager 在远程服务器上且只监听其回环地址，正常情况下先在另一个本机终端建立 SSH 转发：
 

@@ -76,3 +76,22 @@ jobs:
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.cache_scope }}
           cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
+
+      - name: Export Codex binary for slow-registry deployments
+        if: matrix.image == 'codex-runner'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./runner/Dockerfile
+          target: codex-binary
+          platforms: linux/arm64
+          outputs: type=local,dest=${{ runner.temp }}/codex-binary
+          cache-from: type=gha,scope=codex-runner
+
+      - name: Upload Codex ARM64 binary
+        if: matrix.image == 'codex-runner'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/codex-binary/codex
+          retention-days: 3

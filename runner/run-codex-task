@@ -23,14 +23,12 @@ set +e
 # Each task already runs inside its own Docker container. Nested bubblewrap
 # namespaces fail under the default Docker seccomp profile.
 codex_started_ns="$(date +%s%N)"
-codex exec \
+python3 /usr/local/bin/codex-exec-stream.py codex exec \
   --ephemeral \
   --json \
   --sandbox "${CODEX_SANDBOX_MODE:-danger-full-access}" \
   --output-last-message /results/final-message.md \
-  - < /job/prompt.txt \
-  > /results/codex-events.jsonl \
-  2> /results/codex-stderr.log
+  - < /job/prompt.txt
 
 codex_exit_code=$?
 codex_finished_ns="$(date +%s%N)"

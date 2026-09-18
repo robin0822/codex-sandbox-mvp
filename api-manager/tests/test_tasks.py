@@ -238,12 +238,14 @@ class TaskLifecycleTest(unittest.TestCase):
             409,
         )
 
-        task_file.write_text(json.dumps({"task_id": task_id, "status": "succeeded"}))
+        task_file.write_text(json.dumps({"task_id": task_id, "status": "succeeded",
+                                         "skills": ["awesome-api-design", "awesome-bug-fix"]}))
         (result_dir / "exit-code.txt").write_text("0")
         (result_dir / "final-message.md").write_text("Done")
         (result_dir / "git-status.txt").write_text(" M README.md\n")
         (result_dir / "changes.diff").write_text("+MVP_OK\n")
         (result_dir / "codex-events.jsonl").write_text('{"type":"turn.completed"}\n')
+        (result_dir / "loaded-skills.json").write_text('["awesome-api-design", "not-installed"]')
         (result_dir / "clone-milliseconds.txt").write_text("120")
         (result_dir / "codex-milliseconds.txt").write_text("5432")
         response = self.client.get(f"/v1/tasks/{task_id}/result")
@@ -252,6 +254,7 @@ class TaskLifecycleTest(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(result["final_message"], "Done")
+        self.assertEqual(result["loaded_skills"], ["awesome-api-design"])
         self.assertEqual(result["diff"], "+MVP_OK\n")
         self.assertEqual(result["timings_ms"]["local_clone"], 120)
         self.assertEqual(result["timings_ms"]["codex"], 5432)

@@ -129,7 +129,7 @@ class Handler(SimpleHTTPRequestHandler):
         pass
 
     def end_headers(self):
-        if urlsplit(self.path).path in {"/", "/index.html", "/app.js", "/styles.css"}:
+        if urlsplit(self.path).path in {"/", "/index.html", "/app.js", "/styles.css"} or urlsplit(self.path).path.startswith("/vendor/"):
             self.send_header("Cache-Control", "no-store")
         super().end_headers()
 

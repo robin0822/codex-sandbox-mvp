@@ -84,7 +84,16 @@ class LocalPreviewTest(unittest.TestCase):
 
     def test_static_page_and_api_status(self):
         with urlopen(self.base + "/") as response:
-            self.assertIn("Codex 工作台", response.read().decode())
+            page = response.read().decode()
+            self.assertIn("Codex 工作台", page)
+            self.assertIn("/vendor/markdown-it/markdown-it.umd.min.js", page)
+            self.assertIn("/vendor/dompurify/purify.min.js", page)
+        with urlopen(self.base + "/vendor/markdown-it/markdown-it.umd.min.js") as response:
+            self.assertEqual(response.status, 200)
+            self.assertGreater(len(response.read()), 1000)
+        with urlopen(self.base + "/vendor/dompurify/purify.min.js") as response:
+            self.assertEqual(response.status, 200)
+            self.assertGreater(len(response.read()), 1000)
         with urlopen(self.base + "/api/status") as response:
             self.assertTrue(json.load(response)["ready"])
 

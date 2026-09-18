@@ -205,6 +205,16 @@ def _optional_int(path: Path) -> int | None:
         return None
 
 
+def _loaded_skills(result_dir: Path, available: list[str]) -> list[str]:
+    try:
+        reported = json.loads((result_dir / "loaded-skills.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(reported, list):
+        return []
+    return [name for name in available if name in reported]
+
+
 def _write_task(task: dict) -> None:
     path = _task_file(task["task_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -777,6 +787,7 @@ async def get_task_result(task_id: str, request: Request):
             "cache_refreshed": task.get("cache_refreshed"),
         },
         "skills": task.get("skills", []),
+        "loaded_skills": _loaded_skills(result_dir, task.get("skills", [])),
         "timings_ms": {
             "total": total_ms,
             "cache_prepare": (
