@@ -35,6 +35,34 @@ class CodexExecStreamTest(unittest.TestCase):
             self.assertIn("turn.completed", {event["type"] for event in events})
             self.assertEqual(json.loads((root / "loaded-skills.json").read_text()), ["awesome-api-design"])
 
+    def test_reports_skill_only_when_completed_command_returns_its_contents(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            skill = root / "skills" / "awesome-api-design"
+            skill.mkdir(parents=True)
+            document = "---\nname: awesome-api-design\n---\n# API Design\nRead every rule.\n"
+            path = skill / "SKILL.md"
+            path.write_text(document)
+            completed = {"type": "item.completed", "item": {
+                "type": "command_execution", "command": f"cat {path}",
+                "aggregated_output": document, "exit_code": 0}}
+            failed = {"type": "item.completed", "item": {
+                "type": "command_execution", "command": f"cat {path}",
+                "aggregated_output": document, "exit_code": 1}}
+            incomplete = {"type": "item.completed", "item": {
+                "type": "command_execution", "command": f"cat {path}",
+                "aggregated_output": document[:30], "exit_code": 0}}
+            code = "\n".join(["print(" + repr(json.dumps(event)) + ", flush=True)"
+                              for event in [failed, incomplete, completed]])
+            exit_code = stream.run([sys.executable, "-c", code], root / "codex-events.jsonl",
+                                   root / "codex-stderr.log", root / "skills")
+            self.assertEqual(exit_code, 0)
+            events = [json.loads(line) for line in (root / "codex-events.jsonl").read_text().splitlines()]
+            loaded = [event for event in events if event["type"] == "skill.loaded"]
+            self.assertEqual(loaded, [{"type": "skill.loaded", "skill_id": "awesome-api-design",
+                                       "source": "command_output"}])
+            self.assertEqual(json.loads((root / "loaded-skills.json").read_text()), ["awesome-api-design"])
+
 
 if __name__ == "__main__":
     unittest.main()
