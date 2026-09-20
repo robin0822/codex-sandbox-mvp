@@ -42,9 +42,13 @@ class McpMarketplaceTest(unittest.TestCase):
         catalog = self.client.get("/v1/mcp/catalog", headers=self.alice)
         self.assertEqual(catalog.status_code, 200, catalog.text)
         items = catalog.json()["items"]
-        self.assertEqual(len(items), 6)
+        self.assertEqual(len(items), 7)
         self.assertTrue(all(item["transport"] == "streamable-http" for item in items))
         self.assertTrue(all(not item["installed"] for item in items))
+        exa = next(item for item in items if item["id"] == "exa-search")
+        self.assertEqual(exa["endpoint"], "https://mcp.exa.ai/mcp")
+        self.assertEqual(exa["tools"], ["web_search_exa", "web_fetch_exa"])
+        self.assertEqual(exa["category"], "联网搜索")
         self.assertEqual(self.client.post("/v1/mcp/context7/install", headers=self.alice).status_code, 200)
         self.assertEqual(self.client.post("/v1/mcp/context7/install", headers=self.alice).status_code, 200)
         self.assertEqual([item["id"] for item in self.client.get("/v1/mcp", headers=self.alice).json()["items"]],
@@ -86,6 +90,10 @@ class McpMarketplaceTest(unittest.TestCase):
         rendered = mcp_store.render_codex_config('model = "test"\n', [mcp_store.BY_ID["arxiv"]])
         self.assertIn('url = "https://arxiv.caseyjhand.com/mcp"', rendered)
         self.assertNotIn("MCP instructions", rendered)
+        exa = mcp_store.render_codex_config('model = "test"\n', [mcp_store.BY_ID["exa-search"]])
+        self.assertIn('[mcp_servers."exa-search"]', exa)
+        self.assertIn('url = "https://mcp.exa.ai/mcp"', exa)
+        self.assertIn('enabled_tools = ["web_search_exa", "web_fetch_exa"]', exa)
 
 
 if __name__ == "__main__":

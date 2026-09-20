@@ -52,7 +52,7 @@ API Manager 首次启动时把仓库 [skill-catalog/public](skill-catalog/public
 
 ## MCP 广场与 Codex 原生加载
 
-MCP 广场首批包含六个经过 `initialize`、`tools/list` 和代表性 `tools/call` 检查的远程 Streamable HTTP 服务：Context7、arXiv、Wikipedia、Weather、Qt Docs 和 Vonage Docs。公共目录由 `api-manager/app/mcp_store.py` 中的审核清单维护；用户安装状态保存于数据库表 `user_mcp_installations`，不创建用户 MCP 文件目录。
+MCP 广场包含七个经过 `initialize`、`tools/list` 和代表性 `tools/call` 检查的远程 Streamable HTTP 服务：Context7、arXiv、Wikipedia、Exa 联网搜索、Weather、Qt Docs 和 Vonage Docs。Exa 的托管端点可匿名使用，提供 `web_search_exa` 和 `web_fetch_exa`；匿名调用受服务商限流约束。公共目录由 `api-manager/app/mcp_store.py` 中的审核清单维护；用户安装状态保存于数据库表 `user_mcp_installations`，不创建用户 MCP 文件目录。
 
 | 接口 | 用途 |
 | --- | --- |

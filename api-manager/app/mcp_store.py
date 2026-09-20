@@ -77,6 +77,17 @@ CATALOG = (
         ),
     ),
     CatalogMcp(
+        id="exa-search",
+        name="Exa 联网搜索",
+        description="搜索实时网页、新闻和技术资料，并按需读取指定网页的完整内容。",
+        category="联网搜索",
+        endpoint="https://mcp.exa.ai/mcp",
+        registry_name="io.github.exa-labs/exa-mcp-server",
+        version="3.4.1",
+        repository_url="https://github.com/exa-labs/exa-mcp-server",
+        tools=("web_search_exa", "web_fetch_exa"),
+    ),
+    CatalogMcp(
         id="weather-data",
         name="天气与地震数据",
         description="查询美国天气预报、天气预警、全球地震和地理高程数据。",
