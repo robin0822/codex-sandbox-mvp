@@ -1,23 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p /workspace/repository /results
+mkdir -p /results
 
-repository_commit="$(cat /job/repository-commit.txt)"
+execution_mode="$(cat /job/execution-mode.txt 2>/dev/null || printf repository_snapshot)"
 clone_started_ns="$(date +%s%N)"
-
-# The cache is owned by Manager on the host, while Runner uses a separate UID.
-git config --global --add safe.directory /cache/repository.git
-
-git clone \
-  --no-local \
-  /cache/repository.git \
-  /workspace/repository
-git -C /workspace/repository checkout --detach "${repository_commit}"
+if [[ "${execution_mode}" == "repository_snapshot" ]]; then
+  mkdir -p /workspace/repository
+  repository_commit="$(cat /job/repository-commit.txt)"
+  # The cache is owned by Manager on the host, while Runner uses a separate UID.
+  git config --global --add safe.directory /cache/repository.git
+  git clone \
+    --no-local \
+    /cache/repository.git \
+    /workspace/repository
+  git -C /workspace/repository checkout --detach "${repository_commit}"
+  workdir=/workspace/repository
+else
+  workdir=/workspace
+  git config --global --add safe.directory /workspace
+  if [[ ! -d /workspace/.git ]]; then
+    git -C /workspace init -q
+    git -C /workspace config user.name "Codex Workspace"
+    git -C /workspace config user.email "codex@local"
+    git -C /workspace commit --allow-empty -qm "Initialize conversation workspace"
+  fi
+  # A forced timeout can leave useful partial edits. Make them the clean
+  # baseline for the next turn instead of mixing them into its diff.
+  if [[ -n "$(git -C /workspace status --porcelain=v1)" ]]; then
+    git -C /workspace add -A
+    git -C /workspace commit -qm "Recover changes from interrupted turn"
+  fi
+fi
 clone_finished_ns="$(date +%s%N)"
 printf '%s' "$(( (clone_finished_ns - clone_started_ns) / 1000000 ))" > /results/clone-milliseconds.txt
 
-cd /workspace/repository
+cd "${workdir}"
 set +e
 
 # Each task already runs inside its own Docker container. Nested bubblewrap
@@ -35,7 +53,18 @@ codex_finished_ns="$(date +%s%N)"
 printf '%s' "$(( (codex_finished_ns - codex_started_ns) / 1000000 ))" > /results/codex-milliseconds.txt
 
 git status --porcelain=v1 > /results/git-status.txt
-git diff --binary > /results/changes.diff
+if [[ "${execution_mode}" == "conversation_workspace" ]]; then
+  git add -A
+  git diff --cached --binary > /results/changes.diff
+  if ! git diff --cached --quiet; then
+    turn_sequence="$(cat /job/turn-sequence.txt 2>/dev/null || printf unknown)"
+    git commit -qm "Codex conversation turn ${turn_sequence} (exit ${codex_exit_code})"
+  fi
+else
+  # Include files newly created by Codex in the downloadable diff.
+  git add -N . >/dev/null 2>&1 || true
+  git diff --binary > /results/changes.diff
+fi
 printf '%s' "${codex_exit_code}" > /results/exit-code.txt
 
 exit "${codex_exit_code}"

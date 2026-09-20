@@ -1,13 +1,8 @@
 const $ = (id) => document.getElementById(id);
-const DEFAULT_PROJECT = {
-  url: "https://github.com/octocat/Hello-World.git",
-  ref: "master",
-  refresh: false,
-};
 
 const state = {
   user: null,
-  project: { ...DEFAULT_PROJECT },
+  workspacePath: "",
   conversations: [],
   conversationOffset: 0,
   moreConversations: false,
@@ -78,37 +73,53 @@ async function checkApi() {
   }
 }
 
-function activeProject() {
-  return state.activeConversation?.repository || state.project;
-}
-
 function setProjectForm() {
-  const project = activeProject();
-  const path = new URL(project.url).pathname.replace(/\.git$/, "").split("/").filter(Boolean);
-  $("project-label").textContent = path.at(-1) || "选择仓库";
-  $("repository-url").value = project.url;
-  $("repository-ref").value = project.ref;
-  $("repository-refresh").checked = !!project.refresh;
-  for (const id of ["repository-url", "repository-ref", "repository-refresh", "project-save"]) {
-    $(id).disabled = !!state.activeConversation;
+  const workspace = state.activeConversation?.workspace;
+  $("project-label").textContent = workspace?.type === "repository_snapshot" ? "旧仓库会话" : "空白工作区";
+  $("project-save").disabled = !state.activeConversation || workspace?.type !== "conversation_workspace";
+  $("workspace-download").classList.toggle("hidden", !state.activeConversation || workspace?.type !== "conversation_workspace");
+  if (state.activeConversation && workspace?.type === "conversation_workspace") {
+    $("workspace-download").href = `/v1/conversations/${state.activeConversation.id}/workspace`;
   }
-  $("project-popover").querySelector(".popover-heading span").textContent = state.activeConversation
-    ? "当前对话固定使用这个仓库；新建对话后可重新选择"
-    : "新对话会在此仓库的独立副本中执行";
+  if (!state.activeConversation) {
+    $("workspace-files").innerHTML = "<p>发送第一条消息后创建独立空白工作区。</p>";
+  }
 }
 
-function validateProject() {
-  const url = $("repository-url").value.trim();
-  const ref = $("repository-ref").value.trim();
-  let parsed;
-  try { parsed = new URL(url); } catch { throw new Error("请输入完整的 Git HTTPS 地址。"); }
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password || !parsed.hostname) {
-    throw new Error("仓库地址必须是无需内嵌凭据的 HTTPS URL。");
+function formatBytes(value) {
+  if (value == null) return "";
+  if (value < 1024) return value + " B";
+  if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KB";
+  return (value / 1024 / 1024).toFixed(1) + " MB";
+}
+
+async function loadWorkspaceFiles(path = "") {
+  if (!state.activeConversation || state.activeConversation.workspace?.type !== "conversation_workspace") return;
+  const result = await api(`/v1/conversations/${state.activeConversation.id}/files?path=${encodeURIComponent(path)}`);
+  state.workspacePath = path;
+  const list = $("workspace-files");
+  list.replaceChildren();
+  if (path) {
+    const up = node("button", "workspace-file", "↩ 返回上级");
+    up.type = "button";
+    up.dataset.workspacePath = path.split("/").slice(0, -1).join("/");
+    list.append(up);
   }
-  if (!/^[A-Za-z0-9_./-]+$/.test(ref) || ref.includes("..") || ref.startsWith("-")) {
-    throw new Error("分支或标签名称不符合接口要求。");
+  if (!result.items.length) list.append(node("p", null, path ? "这个目录是空的。" : "工作区目前是空的。"));
+  for (const item of result.items) {
+    if (item.type === "directory") {
+      const entry = node("button", "workspace-file", `▸ ${item.name}`);
+      entry.type = "button";
+      entry.dataset.workspacePath = item.path;
+      list.append(entry);
+    } else {
+      const entry = node("a", "workspace-file", `▤ ${item.name}`);
+      entry.href = `/v1/conversations/${state.activeConversation.id}/files/content?path=${encodeURIComponent(item.path)}`;
+      entry.download = item.name;
+      if (item.size_bytes != null) entry.append(node("small", null, formatBytes(item.size_bytes)));
+      list.append(entry);
+    }
   }
-  return { url, ref, refresh: $("repository-refresh").checked };
 }
 
 function closeProject() {
@@ -478,6 +489,7 @@ function newChat() {
   state.beforeSeq = null;
   state.selectedTurn = null;
   state.selectedResult = null;
+  state.workspacePath = "";
   location.hash = "";
   $("top-title").textContent = "新对话";
   $("conversation").classList.add("hidden");
@@ -752,6 +764,7 @@ async function openConversation(id) {
     state.beforeSeq = page.next_before_seq;
     state.selectedTurn = null;
     state.selectedResult = null;
+    state.workspacePath = "";
     $("detail-panel").classList.add("hidden");
     location.hash = conversation.id;
     setProjectForm();
@@ -818,6 +831,9 @@ async function finishLive(turn) {
   } finally {
     turn.finishing = false;
   }
+  if (!$("project-popover").classList.contains("hidden")) {
+    loadWorkspaceFiles(state.workspacePath).catch(() => {});
+  }
   loadConversations().catch(() => {});
 }
 
@@ -863,7 +879,7 @@ async function sendPrompt() {
     if (!state.activeConversation) {
       const conversation = await api("/v1/conversations", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repository: state.project }),
+        body: JSON.stringify({}),
       });
       state.activeConversation = conversation;
       location.hash = conversation.id;
@@ -914,13 +930,13 @@ async function openDetails(turn) {
     const facts = [
       ["状态", result.status === "succeeded" ? "已完成" : result.status === "timed_out" ? "执行超时" : result.status || "失败"],
       ["任务 ID", turn.task_id],
-      ["仓库", state.activeConversation.repository.url],
+      ["工作区", state.activeConversation.workspace?.type === "conversation_workspace" ? "窗口持久工作区" : "旧仓库快照"],
       ["本轮可用技能", result.skills?.length ? result.skills.join("、") : "无"],
       ["本轮显式指定", result.requested_skills?.length ? result.requested_skills.join("、") : "无"],
       ["Codex 原生加载", result.loaded_skills?.length ? result.loaded_skills.join("、") : "无记录"],
       ["命令读取技能文件", result.read_skills?.length ? result.read_skills.join("、") : "无记录"],
       ["本轮原生 MCP", result.mcps?.length ? result.mcps.join("、") : "无"],
-      ["缓存", result.repository?.cache_hit ? "已命中" : "首次创建"],
+      ["本轮版本", result.workspace?.turn_sequence ?? "—"],
       ["总耗时", formatMs(result.timings_ms?.total)],
       ["Codex 执行", formatMs(result.timings_ms?.codex)],
     ];
@@ -938,6 +954,9 @@ async function openDetails(turn) {
     const artifact = (result.artifacts || []).find((entry) => entry.name === "codex-events.jsonl");
     $("events-download").classList.toggle("hidden", !artifact);
     if (artifact) $("events-download").href = artifact.download_url;
+    const workspaceDownload = state.activeConversation.workspace?.type === "conversation_workspace";
+    $("detail-workspace-download").classList.toggle("hidden", !workspaceDownload);
+    if (workspaceDownload) $("detail-workspace-download").href = `/v1/conversations/${state.activeConversation.id}/workspace`;
     $("detail-panel").classList.remove("hidden");
     $("detail-button").disabled = false;
   } catch (error) {
@@ -1052,14 +1071,13 @@ $("project-button").addEventListener("click", () => {
   closeProject();
   $("project-popover").classList.toggle("hidden", !willOpen);
   $("project-button").setAttribute("aria-expanded", String(willOpen));
+  if (willOpen) loadWorkspaceFiles(state.workspacePath).catch((error) => toast("工作区加载失败：" + error.message));
 });
-$("project-save").addEventListener("click", () => {
-  try {
-    state.project = validateProject();
-    setProjectForm();
-    closeProject();
-    toast("新对话的仓库设置已保存。");
-  } catch (error) { toast(error.message); }
+$("project-save").addEventListener("click", () => loadWorkspaceFiles(state.workspacePath)
+  .catch((error) => toast("工作区加载失败：" + error.message)));
+$("workspace-files").addEventListener("click", (event) => {
+  const entry = event.target.closest("[data-workspace-path]");
+  if (entry) loadWorkspaceFiles(entry.dataset.workspacePath).catch((error) => toast("工作区加载失败：" + error.message));
 });
 $("turn-list").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-action]");

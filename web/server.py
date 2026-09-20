@@ -63,6 +63,7 @@ with response:
         "status": response.status,
         "content_type": response.headers.get("Content-Type", "application/json"),
         "retry_after": response.headers.get("Retry-After"),
+        "content_disposition": response.headers.get("Content-Disposition"),
     }
     header = json.dumps(metadata).encode()
     sys.stdout.buffer.write(len(header).to_bytes(4, "big") + header)
@@ -161,7 +162,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlsplit(self.path).path
-        if re.fullmatch(r"/v1/(?:skills|mcp)/[a-z][a-z0-9-]{0,63}", path):
+        if re.fullmatch(r"/v1/(?:skills|mcp)/[a-z][a-z0-9-]{0,63}", path) or re.fullmatch(
+            r"/v1/conversations/[0-9a-f]{32}", path
+        ):
             self._proxy()
         else:
             self.send_error(404)
@@ -324,6 +327,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             if response.headers.get("Retry-After"):
                 self.send_header("Retry-After", response.headers["Retry-After"])
+            if response.headers.get("Content-Disposition"):
+                self.send_header("Content-Disposition", response.headers["Content-Disposition"])
             if is_stream:
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -358,6 +363,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             if metadata.get("retry_after"):
                 self.send_header("Retry-After", metadata["retry_after"])
+            if metadata.get("content_disposition"):
+                self.send_header("Content-Disposition", metadata["content_disposition"])
             if content_type.startswith("text/event-stream"):
                 self.send_header("Connection", "close")
                 self.end_headers()

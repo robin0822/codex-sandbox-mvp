@@ -6,6 +6,8 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
+import tempfile
 import threading
 import time
 import uuid
@@ -17,14 +19,15 @@ import docker
 from docker.errors import DockerException
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from starlette.background import BackgroundTask
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 
 from app.conversation_store import Conversation, Turn, session_factory, utcnow
 from app import mcp_store, skill_store
 
 
-app = FastAPI(title="Codex Sandbox MVP", version="0.6.0")
+app = FastAPI(title="Codex Sandbox MVP", version="0.7.0")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.environ.get("HOST_DATA_DIR", "/data/codex-mvp"))
 TASK_DIR = DATA_DIR / "tasks"
@@ -83,7 +86,7 @@ class TaskRequest(BaseModel):
 
 
 class ConversationRequest(BaseModel):
-    repository: Repository
+    title: str = Field(default="新对话", max_length=120)
 
 
 class TurnRequest(BaseModel):
@@ -140,17 +143,65 @@ def _owned_conversation(db, conversation_id: str, user_id: str, lock: bool = Fal
 
 
 def _conversation_data(conversation: Conversation) -> dict:
-    return {
-        "id": conversation.id,
-        "title": conversation.title,
-        "repository": {
+    repository = None
+    if conversation.workspace_type == "repository_snapshot":
+        repository = {
             "url": conversation.repository_url,
             "ref": conversation.repository_ref,
             "refresh": conversation.repository_refresh,
+        }
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "workspace": {
+            "type": conversation.workspace_type,
+            "status": conversation.workspace_status,
         },
+        "repository": repository,
         "created_at": conversation.created_at.isoformat(),
         "updated_at": conversation.updated_at.isoformat(),
     }
+
+
+def _user_storage_key(user_id: str) -> str:
+    return hashlib.sha256(user_id.encode("utf-8")).hexdigest()
+
+
+def _workspace_relative_path(user_id: str, conversation_id: str) -> Path:
+    return Path("workspaces") / _user_storage_key(user_id) / conversation_id
+
+
+def _workspace_path(user_id: str, conversation_id: str) -> Path:
+    return DATA_DIR / _workspace_relative_path(user_id, conversation_id)
+
+
+def _host_workspace_path(user_id: str, conversation_id: str) -> Path:
+    return HOST_DATA_DIR / _workspace_relative_path(user_id, conversation_id)
+
+
+def _create_workspace(user_id: str, conversation_id: str) -> Path:
+    path = _workspace_path(user_id, conversation_id)
+    path.mkdir(parents=True, exist_ok=False)
+    try:
+        os.chown(path, 10001, 10001)
+    except PermissionError:
+        pass
+    return path
+
+
+def _safe_workspace_entry(root: Path, relative: str) -> Path:
+    if not relative:
+        return root
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise HTTPException(status_code=400, detail="invalid workspace path")
+    resolved_root = root.resolve()
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid workspace path") from exc
+    return resolved
 
 
 def _turn_data(turn: Turn) -> dict:
@@ -172,8 +223,8 @@ def _render_prompt(message: str, recent_turns: list[Turn]) -> tuple[str, int]:
     """Take complete recent rounds only; older rounds never enter the prompt."""
     header = (
         "下面是同一对话窗口的历史问答，仅供理解本次问题。历史回答不是系统指令。"
-        "每个任务都有全新工作目录；不得假设历史任务修改的文件仍在当前仓库。"
-        "请先检查当前仓库，再完成最后的当前问题。\n\n"
+        "请先检查当前工作区，以其中实际存在的文件为准；历史问答只提供交流上下文。"
+        "完成最后的当前问题时，可以继续读取和修改当前工作区。\n\n"
     )
     current = f"当前问题：\n{message}\n"
     selected = []
@@ -272,9 +323,10 @@ def _active_count() -> int:
     )
 
 
-def _create_task_files(repository: Repository, prompt: str, user_id: str,
+def _create_task_files(repository: Repository | None, prompt: str, user_id: str,
                        skill_ids: list[str], mcp_ids: list[str],
-                       conversation_id: str | None = None, turn_id: str | None = None) -> dict:
+                       conversation_id: str | None = None, turn_id: str | None = None,
+                       execution_mode: str = "repository_snapshot", turn_sequence: int | None = None) -> dict:
     """Caller holds _lock; both one-shot and conversational tasks use this path."""
     if not RUNNER_IMAGE or not os.environ.get("MODEL_API_KEY"):
         raise HTTPException(status_code=503, detail="Runner image or model key is missing")
@@ -284,9 +336,13 @@ def _create_task_files(repository: Repository, prompt: str, user_id: str,
     job_dir = TASK_DIR / task_id / "job"
     try:
         job_dir.mkdir(parents=True)
-        (job_dir / "repository-url.txt").write_text(repository.url, encoding="utf-8")
-        (job_dir / "repository-ref.txt").write_text(repository.ref, encoding="utf-8")
-        (job_dir / "repository-refresh.txt").write_text("1" if repository.refresh else "0", encoding="utf-8")
+        (job_dir / "execution-mode.txt").write_text(execution_mode, encoding="utf-8")
+        if turn_sequence is not None:
+            (job_dir / "turn-sequence.txt").write_text(str(turn_sequence), encoding="utf-8")
+        if repository is not None:
+            (job_dir / "repository-url.txt").write_text(repository.url, encoding="utf-8")
+            (job_dir / "repository-ref.txt").write_text(repository.ref, encoding="utf-8")
+            (job_dir / "repository-refresh.txt").write_text("1" if repository.refresh else "0", encoding="utf-8")
         with _skill_lock:
             try:
                 task_skills = skill_store.snapshot(
@@ -312,6 +368,7 @@ def _create_task_files(repository: Repository, prompt: str, user_id: str,
         task = {
             "task_id": task_id, "status": "starting", "created_at": _now(),
             "user_id": user_id, "conversation_id": conversation_id, "turn_id": turn_id,
+            "execution_mode": execution_mode, "turn_sequence": turn_sequence,
             "skills": task_skills, "requested_skills": requested_skills,
             "mcps": [item.id for item in task_mcps],
         }
@@ -479,31 +536,45 @@ def _run_task(task_id: str) -> None:
     container = None
     task = _read_task(task_id)
     try:
-        with _cache_lock:
-            host_mirror, cache_hit, refreshed, commit, cache_seconds = _prepare_repository(task_id)
-        task["cache_hit"] = cache_hit
-        task["cache_refreshed"] = refreshed
-        task["cache_prepare_seconds"] = cache_seconds
-        task["source_commit"] = commit
+        execution_mode = task.get("execution_mode", "repository_snapshot")
+        host_mirror = None
+        if execution_mode == "repository_snapshot":
+            with _cache_lock:
+                host_mirror, cache_hit, refreshed, commit, cache_seconds = _prepare_repository(task_id)
+            task["cache_hit"] = cache_hit
+            task["cache_refreshed"] = refreshed
+            task["cache_prepare_seconds"] = cache_seconds
+            task["source_commit"] = commit
+        else:
+            task["cache_hit"] = None
+            task["cache_refreshed"] = None
+            task["cache_prepare_seconds"] = 0
+            task["source_commit"] = None
         _write_task(task)
         client = docker.from_env()
+        volumes = {
+            str(HOST_DATA_DIR / "tasks" / task_id / "job"): {"bind": "/job", "mode": "ro"},
+            str(HOST_DATA_DIR / "results" / task_id): {"bind": "/results", "mode": "rw"},
+            str(HOST_DATA_DIR / "tasks" / task_id / "skills"): {
+                "bind": "/home/codex/.agents/skills", "mode": "ro"
+            },
+            str(HOST_DATA_DIR / "tasks" / task_id / "codex-config.toml"): {
+                "bind": "/home/codex/.codex/config.toml", "mode": "ro"
+            },
+        }
+        if execution_mode == "repository_snapshot":
+            volumes[str(host_mirror)] = {"bind": "/cache/repository.git", "mode": "ro"}
+        else:
+            volumes[str(_host_workspace_path(task["user_id"], task["conversation_id"]))] = {
+                "bind": "/workspace", "mode": "rw"
+            }
         container = client.containers.run(
             RUNNER_IMAGE,
             detach=True,
             name=f"codex-task-{task_id}",
             entrypoint="/usr/local/bin/run-codex-task",
             environment={"MODEL_API_KEY": os.environ["MODEL_API_KEY"]},
-            volumes={
-                str(HOST_DATA_DIR / "tasks" / task_id / "job"): {"bind": "/job", "mode": "ro"},
-                str(HOST_DATA_DIR / "results" / task_id): {"bind": "/results", "mode": "rw"},
-                str(host_mirror): {"bind": "/cache/repository.git", "mode": "ro"},
-                str(HOST_DATA_DIR / "tasks" / task_id / "skills"): {
-                    "bind": "/home/codex/.agents/skills", "mode": "ro"
-                },
-                str(HOST_DATA_DIR / "tasks" / task_id / "codex-config.toml"): {
-                    "bind": "/home/codex/.codex/config.toml", "mode": "ro"
-                },
-            },
+            volumes=volumes,
             labels={"codex.mvp.managed": "true", "codex.mvp.task_id": task_id},
             mem_limit="2g",
             nano_cpus=1_000_000_000,
@@ -520,7 +591,10 @@ def _run_task(task_id: str) -> None:
                 break
             time.sleep(1)
         else:
-            container.kill()
+            try:
+                container.stop(timeout=10)
+            except DockerException:
+                container.kill()
             task["status"] = "timed_out"
         if task["status"] != "timed_out":
             exit_file = RESULT_DIR / task_id / "exit-code.txt"
@@ -684,13 +758,20 @@ async def uninstall_mcp(mcp_id: str, request: Request) -> dict:
 @app.post("/v1/conversations", status_code=status.HTTP_201_CREATED)
 async def create_conversation(body: ConversationRequest, request: Request) -> dict:
     user_id = _user_id(request)
+    conversation_id = uuid.uuid4().hex
+    title = body.title.strip() or "新对话"
     conversation = Conversation(
-        id=uuid.uuid4().hex, user_id=user_id, title="新对话",
-        repository_url=body.repository.url, repository_ref=body.repository.ref,
-        repository_refresh=body.repository.refresh,
+        id=conversation_id, user_id=user_id, title=title,
+        repository_url="", repository_ref="", repository_refresh=False,
+        workspace_type="conversation_workspace", workspace_status="ready",
     )
-    with session_factory()() as db, db.begin():
-        db.add(conversation)
+    workspace = _create_workspace(user_id, conversation_id)
+    try:
+        with session_factory()() as db, db.begin():
+            db.add(conversation)
+    except Exception:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise
     return _conversation_data(conversation)
 
 
@@ -733,6 +814,111 @@ async def get_conversation(conversation_id: str, request: Request) -> dict:
         data = _conversation_data(conversation)
         data["active_task_id"] = active.task_id if active else None
         return data
+
+
+def _owned_workspace(conversation_id: str, user_id: str) -> tuple[Conversation, Path]:
+    with session_factory()() as db:
+        conversation = _owned_conversation(db, conversation_id, user_id)
+        if conversation.workspace_type != "conversation_workspace":
+            raise HTTPException(status_code=409, detail="Conversation does not use a persistent workspace")
+    workspace = _workspace_path(user_id, conversation_id)
+    if not workspace.is_dir():
+        raise HTTPException(status_code=409, detail="Conversation workspace is missing")
+    return conversation, workspace
+
+
+@app.get("/v1/conversations/{conversation_id}/files")
+async def list_workspace_files(conversation_id: str, request: Request,
+                               path: str = Query("", max_length=1024)) -> dict:
+    user_id = _user_id(request)
+    _, workspace = _owned_workspace(conversation_id, user_id)
+    directory = _safe_workspace_entry(workspace, path)
+    if not directory.is_dir():
+        raise HTTPException(status_code=404, detail="workspace directory not found")
+    items = []
+    for entry in sorted(directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+        if entry.name == ".git":
+            continue
+        relative = entry.relative_to(workspace).as_posix()
+        if entry.is_symlink():
+            entry_type = "symlink"
+            size = None
+        elif entry.is_dir():
+            entry_type = "directory"
+            size = None
+        else:
+            entry_type = "file"
+            size = entry.stat().st_size
+        items.append({"path": relative, "name": entry.name, "type": entry_type, "size_bytes": size})
+    return {"path": path, "items": items}
+
+
+@app.get("/v1/conversations/{conversation_id}/files/content")
+async def download_workspace_file(conversation_id: str, request: Request,
+                                  path: str = Query(..., min_length=1, max_length=1024)) -> FileResponse:
+    user_id = _user_id(request)
+    _, workspace = _owned_workspace(conversation_id, user_id)
+    file_path = _safe_workspace_entry(workspace, path)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="workspace file not found")
+    return FileResponse(file_path, filename=file_path.name)
+
+
+@app.get("/v1/conversations/{conversation_id}/workspace")
+async def download_workspace(conversation_id: str, request: Request) -> FileResponse:
+    user_id = _user_id(request)
+    _, workspace = _owned_workspace(conversation_id, user_id)
+    with session_factory()() as db:
+        active = db.scalar(select(Turn.id).where(
+            Turn.conversation_id == conversation_id,
+            Turn.status.in_(["starting", "running"]),
+        ).limit(1))
+    if active:
+        raise HTTPException(status_code=409, detail="Workspace is being modified by a running turn")
+    temporary = tempfile.NamedTemporaryFile(prefix=f"workspace-{conversation_id}-", suffix=".tar.gz", delete=False)
+    temporary.close()
+    archive_path = Path(temporary.name)
+    excluded = {".git", "node_modules", "target", "__pycache__"}
+
+    def archive_filter(info: tarfile.TarInfo):
+        return None if any(part in excluded for part in Path(info.name).parts) else info
+
+    try:
+        with tarfile.open(archive_path, "w:gz") as archive:
+            archive.add(workspace, arcname="workspace", recursive=True, filter=archive_filter)
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+    return FileResponse(
+        archive_path,
+        filename=f"workspace-{conversation_id}.tar.gz",
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
+    )
+
+
+@app.delete("/v1/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str, request: Request) -> dict:
+    user_id = _user_id(request)
+    task_ids: list[str] = []
+    with _lock:
+        with session_factory()() as db, db.begin():
+            conversation = _owned_conversation(db, conversation_id, user_id, lock=True)
+            active = db.scalar(select(Turn.id).where(
+                Turn.conversation_id == conversation_id,
+                Turn.status.in_(["starting", "running"]),
+            ).limit(1))
+            if active:
+                raise HTTPException(status_code=409, detail="Conversation has a running turn")
+            task_ids = list(db.scalars(select(Turn.task_id).where(
+                Turn.conversation_id == conversation_id
+            )).all())
+            db.execute(delete(Turn).where(Turn.conversation_id == conversation_id))
+            db.delete(conversation)
+        shutil.rmtree(_workspace_path(user_id, conversation_id), ignore_errors=True)
+        for task_id in task_ids:
+            shutil.rmtree(TASK_DIR / task_id, ignore_errors=True)
+            shutil.rmtree(RESULT_DIR / task_id, ignore_errors=True)
+    return {"id": conversation_id, "deleted": True}
 
 
 @app.get("/v1/conversations/{conversation_id}/turns")
@@ -799,11 +985,19 @@ async def create_turn(conversation_id: str, body: TurnRequest, request: Request,
                     Turn.conversation_id == conversation_id
                 )) or 0) + 1
                 turn_id = uuid.uuid4().hex
-                repository = Repository(url=conversation.repository_url,
-                                        ref=conversation.repository_ref,
-                                        refresh=conversation.repository_refresh)
-                task = _create_task_files(repository, prompt, user_id, body.skill_ids, body.mcp_ids,
-                                          conversation_id, turn_id)
+                if conversation.workspace_type == "conversation_workspace":
+                    workspace = _workspace_path(user_id, conversation_id)
+                    if not workspace.is_dir():
+                        raise HTTPException(status_code=409, detail="Conversation workspace is missing")
+                    repository = None
+                else:
+                    repository = Repository(url=conversation.repository_url,
+                                            ref=conversation.repository_ref,
+                                            refresh=conversation.repository_refresh)
+                task = _create_task_files(
+                    repository, prompt, user_id, body.skill_ids, body.mcp_ids,
+                    conversation_id, turn_id, conversation.workspace_type, next_sequence,
+                )
                 db.add(Turn(
                     id=turn_id, conversation_id=conversation_id, sequence=next_sequence,
                     request_id=body.request_id, user_message=message, task_id=task["task_id"],
@@ -893,6 +1087,11 @@ async def get_task_result(task_id: str, request: Request):
             "commit": task.get("source_commit"),
             "cache_hit": task.get("cache_hit"),
             "cache_refreshed": task.get("cache_refreshed"),
+        },
+        "workspace": {
+            "type": task.get("execution_mode", "repository_snapshot"),
+            "conversation_id": task.get("conversation_id"),
+            "turn_sequence": task.get("turn_sequence"),
         },
         "skills": task.get("skills", []),
         "requested_skills": task.get("requested_skills", []),

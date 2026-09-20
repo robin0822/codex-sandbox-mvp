@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone
 from functools import lru_cache
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -25,6 +25,12 @@ class Conversation(Base):
     repository_url: Mapped[str] = mapped_column(Text, nullable=False)
     repository_ref: Mapped[str] = mapped_column(String(200), nullable=False)
     repository_refresh: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    workspace_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="repository_snapshot", server_default="repository_snapshot"
+    )
+    workspace_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="ready", server_default="ready"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
@@ -78,4 +84,18 @@ def session_factory():
         kwargs["connect_args"] = {"check_same_thread": False}
     engine = create_engine(url, **kwargs)
     Base.metadata.create_all(engine)
+    # create_all does not add columns to an existing deployment. Keep this
+    # migration idempotent so the current PostgreSQL volume upgrades in place.
+    columns = {column["name"] for column in inspect(engine).get_columns("conversations")}
+    with engine.begin() as connection:
+        if "workspace_type" not in columns:
+            connection.execute(text(
+                "ALTER TABLE conversations ADD COLUMN workspace_type "
+                "VARCHAR(32) NOT NULL DEFAULT 'repository_snapshot'"
+            ))
+        if "workspace_status" not in columns:
+            connection.execute(text(
+                "ALTER TABLE conversations ADD COLUMN workspace_status "
+                "VARCHAR(16) NOT NULL DEFAULT 'ready'"
+            ))
     return sessionmaker(engine, expire_on_commit=False)

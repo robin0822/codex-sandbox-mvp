@@ -108,6 +108,24 @@ class TaskLifecycleTest(unittest.TestCase):
         self.assertTrue(self.client.get(f"/v1/tasks/{task_id}").json()["cache_hit"])
         self.assertEqual(self.client.get("/v1/capacity").json()["running_tasks"], 0)
 
+    def test_conversation_task_mounts_persistent_workspace_read_write(self):
+        conversation_id = "c" * 32
+        workspace = main._create_workspace("local-dev", conversation_id)
+        task = main._create_task_files(
+            None, "Create a file", "local-dev", [], [], conversation_id, "d" * 32,
+            "conversation_workspace", 1,
+        )
+        main._run_task(task["task_id"])
+        host_workspace = main._host_workspace_path("local-dev", conversation_id)
+        self.assertEqual(
+            self.docker.options["volumes"][str(host_workspace)],
+            {"bind": "/workspace", "mode": "rw"},
+        )
+        self.assertNotIn("/cache/repository.git", {
+            item["bind"] for item in self.docker.options["volumes"].values()
+        })
+        self.assertTrue(workspace.is_dir())
+
     def test_repository_cache_cold_warm_and_explicit_refresh(self):
         source = self.root / "source"
         subprocess.run(["git", "init", "-q", str(source)], check=True)

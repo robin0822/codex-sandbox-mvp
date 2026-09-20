@@ -1,4 +1,6 @@
 import json
+import io
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,10 +61,59 @@ class ConversationTest(unittest.TestCase):
 
     def create_conversation(self, headers=None):
         response = self.client.post(
-            "/v1/conversations", json={"repository": self.repository}, headers=headers or self.alice
+            "/v1/conversations", json={}, headers=headers or self.alice
         )
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["id"]
+
+    def test_each_window_has_an_isolated_persistent_blank_workspace(self):
+        first = self.create_conversation()
+        second = self.create_conversation()
+        first_path = main._workspace_path("alice", first)
+        second_path = main._workspace_path("alice", second)
+        self.assertTrue(first_path.is_dir())
+        self.assertTrue(second_path.is_dir())
+        self.assertNotEqual(first_path, second_path)
+        (first_path / "hello.txt").write_text("第一轮文件", encoding="utf-8")
+
+        turn = self.post_turn(first, "继续修改 hello.txt")
+        self.assertEqual(turn.status_code, 202, turn.text)
+        task = self.client.get(f"/v1/tasks/{turn.json()['task_id']}", headers=self.alice).json()
+        self.assertEqual(task["execution_mode"], "conversation_workspace")
+        self.assertTrue((first_path / "hello.txt").is_file())
+        self.assertFalse((second_path / "hello.txt").exists())
+
+        listing = self.client.get(f"/v1/conversations/{first}/files", headers=self.alice)
+        self.assertEqual(listing.status_code, 200, listing.text)
+        self.assertEqual(listing.json()["items"][0]["path"], "hello.txt")
+        content = self.client.get(
+            f"/v1/conversations/{first}/files/content?path=hello.txt", headers=self.alice
+        )
+        self.assertEqual(content.content.decode(), "第一轮文件")
+        self.assertEqual(
+            self.client.get(f"/v1/conversations/{first}/files", headers=self.bob).status_code, 404
+        )
+        self.assertEqual(
+            self.client.get(f"/v1/conversations/{first}/files/content?path=../secret", headers=self.alice).status_code,
+            400,
+        )
+
+        archive = self.client.get(f"/v1/conversations/{first}/workspace", headers=self.alice)
+        self.assertEqual(archive.status_code, 200, archive.text)
+        with tarfile.open(fileobj=io.BytesIO(archive.content), mode="r:gz") as bundle:
+            self.assertIn("workspace/hello.txt", bundle.getnames())
+            self.assertFalse(any(".git" in name.split("/") for name in bundle.getnames()))
+
+    def test_delete_conversation_removes_workspace_and_history(self):
+        conversation_id = self.create_conversation()
+        workspace = main._workspace_path("alice", conversation_id)
+        (workspace / "remove-me.txt").write_text("delete", encoding="utf-8")
+        response = self.client.delete(f"/v1/conversations/{conversation_id}", headers=self.alice)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(workspace.exists())
+        self.assertEqual(self.client.get(
+            f"/v1/conversations/{conversation_id}", headers=self.alice
+        ).status_code, 404)
 
     def post_turn(self, conversation_id, message, headers=None, request_id=None,
                   skill_ids=None, mcp_ids=None):

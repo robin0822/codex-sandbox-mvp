@@ -1,6 +1,6 @@
 # Codex Sandbox MVP
 
-公开实验仓库，用两个 ARM64 镜像验证一次性 Codex 沙箱闭环：
+公开实验仓库，用两个 ARM64 镜像验证持久对话工作区与一次性 Codex Runner 闭环：
 
 - `codex-api-manager`：常驻 API/SSE 与 Docker 生命周期管理服务。
 - `codex-runner`：每个任务创建一个，任务结束后销毁。
@@ -65,26 +65,32 @@ MCP 广场首批包含六个经过 `initialize`、`tools/list` 和代表性 `too
 
 安装状态只影响之后创建的任务。运行时原生 `mcp_tool_call` 的开始、完成和失败状态会随 Codex JSONL 进入现有 SSE，前端在执行进度中直接展示。公共 Registry 里的条目不会自动发布到广场；新增条目应先核对来源、认证方式、工具权限、连接状态和实际调用结果。
 
-## 多窗口对话与五轮上下文
+## 多窗口、持久工作区与五轮上下文
 
-对话元数据持久化在 PostgreSQL。一个用户可拥有多个对话窗口，历史问答完整保留并分页读取；每次执行只从**当前窗口最近五轮成功问答**选取上下文。失败任务显示在历史中，但不计入模型上下文。超出 `MAX_HISTORY_BYTES` 的上下文会从最旧的一整轮开始舍弃；响应里的 `context_rounds_used` 表示实际使用轮数。该字节预算是应用侧保护值，不代表模型真实 Token 上限。
+对话元数据持久化在 PostgreSQL。一个用户可拥有多个对话窗口，每个新窗口在 `/data/codex-mvp/workspaces/<用户哈希>/<conversation-id>/` 拥有独立空白工作区。同一窗口的每轮任务都会创建新的 Runner，但以读写方式挂载同一工作区，所以第一轮创建的文件能在后续轮次继续读取和修改；不同窗口的目录彼此隔离。历史问答完整保留并分页读取；每次执行只从**当前窗口最近五轮成功问答**选取上下文。失败任务显示在历史中，但不计入模型上下文。超出 `MAX_HISTORY_BYTES` 的上下文会从最旧的一整轮开始舍弃。
+
+Runner 仍使用 `codex exec --ephemeral`：Codex 自身不保存会话，交流上下文由 Manager 提供，文件状态由持久工作区提供。工作区内部使用本地 Git 检查点记录每轮文件变化，不连接远程仓库。旧的 `POST /v1/tasks` 继续支持 Git 仓库快照模式，用于单次任务和兼容测试。
 
 新增接口：
 
 | 接口 | 作用 |
 | --- | --- |
 | `GET /v1/me` | 返回当前用户标识 |
-| `POST /v1/conversations` | 创建绑定仓库的新窗口 |
+| `POST /v1/conversations` | 创建带独立空白工作区的新窗口 |
 | `GET /v1/conversations?limit=50&offset=0` | 分页列出当前用户的窗口摘要 |
 | `GET /v1/conversations/{id}` | 读取窗口信息和运行中的任务 ID |
 | `GET /v1/conversations/{id}/turns?limit=20&before_seq=N` | 向前分页读取该窗口完整历史 |
 | `POST /v1/conversations/{id}/turns` | 提交当前问题，返回 `turn_id`、`task_id`、事件与结果链接 |
+| `GET /v1/conversations/{id}/files` | 浏览当前窗口工作区文件 |
+| `GET /v1/conversations/{id}/files/content?path=...` | 下载工作区中的单个文件 |
+| `GET /v1/conversations/{id}/workspace` | 下载排除构建缓存与内部 Git 的工作区压缩包 |
+| `DELETE /v1/conversations/{id}` | 删除窗口、历史、任务结果和工作区 |
 
 提交示例：`{"message":"继续解释上一条回答","request_id":"client-generated-id"}`。`request_id` 用于安全重试，不能在同一窗口复用到不同问题。每个窗口同时只允许一个运行中的任务；其他窗口仍受 `MAX_ACTIVE_TASKS` 全局限制。原有单次任务接口和 Runner 创建、销毁流程保持不变。
 
 `USER_API_KEYS_JSON` 可配置用户与 API Key。在 `.env` 中写入 `USER_API_KEYS_JSON='{"alice":"replace-with-random-key","bob":"replace-with-another-key"}'`，并设 `ALLOW_LOCAL_DEV_USER=0`。配置后，所有对话和任务接口要求 `Authorization: Bearer <key>`，任务事件、结果和产物也按所有者校验。未配置时仅用于本地实验，所有请求属于 `local-dev`。浏览器输入的 Key 只保存在本地 Web 服务进程的短时会话中，浏览器只收 HttpOnly Cookie。
 
-新窗口只继承仓库设置，不继承任何对话上下文。每轮仍使用新 Runner 和仓库独立副本，因此历史任务里未提交的文件变更不会自动出现在下一轮。
+新窗口不继承其他窗口的对话或文件。每轮仍使用新的 Runner；Runner 结束后容器被删除，窗口工作区继续保留。一个窗口同时只运行一轮，避免两个 Runner 并发写入同一目录。
 
 ## 本地前端原型
 
@@ -94,7 +100,7 @@ MCP 广场首批包含六个经过 `initialize`、`tools/list` 和代表性 `too
 python3 web/server.py
 ```
 
-打开 <http://127.0.0.1:5173>。左侧从服务端加载用户的对话窗口；打开窗口后分页读取完整历史，中间显示多轮提问与回答，运行时把可读推理摘要与命令、工具、Skill 加载和 MCP 调用等执行事件分区展示，右侧可查看每轮代码变更。模型未返回摘要时页面明确显示“未提供”，不会编造内部推理。回答和推理摘要使用随页面一起提供的 Markdown 渲染器，并清理不安全的 HTML；不依赖外部 CDN。刷新会恢复当前窗口及其历史。新对话在第一次提问时创建；仓库设置在该窗口内固定。技能广场和 MCP 广场均支持按用户安装与卸载；知识库仍是预留入口。页面提交时只发送当前问题，最近五轮上下文由 API Manager 从数据库读取。
+打开 <http://127.0.0.1:5173>。左侧从服务端加载用户的对话窗口；打开窗口后分页读取完整历史，中间显示多轮提问与回答，运行时把可读推理摘要与命令、工具、Skill 加载和 MCP 调用等执行事件分区展示，右侧可查看每轮代码变更。模型未返回摘要时页面明确显示“未提供”，不会编造内部推理。回答和推理摘要使用随页面一起提供的 Markdown 渲染器，并清理不安全的 HTML；不依赖外部 CDN。刷新会恢复当前窗口及其历史。新对话在第一次提问时创建，并同时分配独立空白工作区。顶部工作区入口可以浏览和下载当前窗口文件。技能广场和 MCP 广场均支持按用户安装与卸载；知识库仍是预留入口。页面提交时只发送当前问题，最近五轮上下文由 API Manager 从数据库读取。
 
 如果 API Manager 在远程服务器上且只监听其回环地址，正常情况下先在另一个本机终端建立 SSH 转发：
 
