@@ -131,6 +131,15 @@ def installed_catalog(db, user_id: str) -> list[CatalogMcp]:
     return [item for item in CATALOG if item.id in installed]
 
 
+def selected_catalog(db, user_id: str, selected_ids: list[str]) -> list[CatalogMcp]:
+    """Return selected servers in request order after checking user installation."""
+    installed = installed_ids(db, user_id)
+    missing = [mcp_id for mcp_id in selected_ids if mcp_id not in installed or mcp_id not in BY_ID]
+    if missing:
+        raise KeyError(missing[0])
+    return [BY_ID[mcp_id] for mcp_id in selected_ids]
+
+
 def install(db, user_id: str, mcp_id: str) -> bool:
     if mcp_id not in BY_ID:
         raise KeyError(mcp_id)

@@ -73,7 +73,8 @@ class SkillMarketplaceTest(unittest.TestCase):
         self.assertEqual(self.client.post("/v1/skills/unknown/install", headers=self.alice).status_code, 404)
         self.assertEqual(self.client.post("/v1/skills/awesome-code-review/install", headers=self.alice).status_code, 200)
         task = self.client.post("/v1/tasks", headers=self.alice, json={
-            "repository": {"url": "https://example.com/repo.git"}, "prompt": "$awesome-code-review review",
+            "repository": {"url": "https://example.com/repo.git"}, "prompt": "review",
+            "skill_ids": ["awesome-code-review"],
         })
         self.assertEqual(task.status_code, 202, task.text)
         task_id = task.json()["task_id"]
@@ -81,7 +82,7 @@ class SkillMarketplaceTest(unittest.TestCase):
         self.assertTrue((snapshot / "SKILL.md").is_file())
         self.assertTrue((snapshot / "references" / "smell-baseline.md").is_file())
         job = self.root / "tasks" / task_id / "job"
-        self.assertEqual((job / "prompt.txt").read_text(), "$awesome-code-review review")
+        self.assertEqual((job / "prompt.txt").read_text(), "$awesome-code-review\n\nreview")
         self.assertFalse((job / "explicit-skills.json").exists())
         self.assertNotIn((snapshot / "SKILL.md").read_text().strip(), (job / "prompt.txt").read_text())
         self.assertEqual(self.client.get(f"/v1/tasks/{task_id}", headers=self.alice).json()["requested_skills"],
@@ -92,17 +93,26 @@ class SkillMarketplaceTest(unittest.TestCase):
         self.assertTrue((snapshot / "SKILL.md").is_file())
         self.assertFalse((skill_store.user_dir(self.root, "alice") / "awesome-code-review").exists())
         with patch.object(main, "MAX_ACTIVE_TASKS", 2):
+            rejected = self.client.post("/v1/tasks", headers=self.alice, json={
+                "repository": {"url": "https://example.com/repo.git"}, "prompt": "review",
+                "skill_ids": ["awesome-code-review"],
+            })
+        self.assertEqual(rejected.status_code, 409)
+        with patch.object(main, "MAX_ACTIVE_TASKS", 2):
             bob_task = self.client.post("/v1/tasks", headers=self.bob, json={
                 "repository": {"url": "https://example.com/repo.git"}, "prompt": "Review",
             })
         self.assertEqual(bob_task.status_code, 202)
         self.assertEqual(self.client.get(f"/v1/tasks/{bob_task.json()['task_id']}", headers=self.bob).json()["skills"], [])
 
-    def test_skill_mentions_in_history_do_not_activate_current_turn(self):
-        self.assertEqual(main._explicit_skills("新问题没有技能调用", ["awesome-api-design"]), [])
-        self.assertEqual(main._explicit_skills("请用 $awesome-api-design 设计接口", ["awesome-api-design"]),
-                         ["awesome-api-design"])
-        self.assertEqual(main._explicit_skills("请用 $awesome-api-design 设计接口", []), [])
+    def test_capability_ids_must_be_unique_and_valid(self):
+        body = {"repository": {"url": "https://example.com/repo.git"}, "prompt": "review"}
+        duplicate = self.client.post("/v1/tasks", headers=self.alice,
+                                     json={**body, "skill_ids": ["a-skill", "a-skill"]})
+        invalid = self.client.post("/v1/tasks", headers=self.alice,
+                                   json={**body, "skill_ids": ["INVALID"]})
+        self.assertEqual(duplicate.status_code, 422)
+        self.assertEqual(invalid.status_code, 422)
 
     def test_administrator_removal_from_public_is_not_reseeded(self):
         self.client.get("/v1/skills/catalog", headers=self.alice)

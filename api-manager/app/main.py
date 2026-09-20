@@ -71,6 +71,15 @@ class Repository(BaseModel):
 class TaskRequest(BaseModel):
     repository: Repository
     prompt: str = Field(min_length=1, max_length=20000)
+    skill_ids: list[str] = Field(default_factory=list, max_length=skill_store.MAX_INSTALLED)
+    mcp_ids: list[str] = Field(default_factory=list, max_length=mcp_store.MAX_INSTALLED)
+
+    @field_validator("skill_ids", "mcp_ids")
+    @classmethod
+    def validate_capability_ids(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or any(not skill_store.SKILL_ID.fullmatch(item) for item in value):
+            raise ValueError("capability IDs must be unique lowercase identifiers")
+        return value
 
 
 class ConversationRequest(BaseModel):
@@ -80,6 +89,15 @@ class ConversationRequest(BaseModel):
 class TurnRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20000)
     request_id: str | None = Field(default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    skill_ids: list[str] = Field(default_factory=list, max_length=skill_store.MAX_INSTALLED)
+    mcp_ids: list[str] = Field(default_factory=list, max_length=mcp_store.MAX_INSTALLED)
+
+    @field_validator("skill_ids", "mcp_ids")
+    @classmethod
+    def validate_capability_ids(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or any(not skill_store.SKILL_ID.fullmatch(item) for item in value):
+            raise ValueError("capability IDs must be unique lowercase identifiers")
+        return value
 
 
 def _user_id(request: Request) -> str:
@@ -228,11 +246,6 @@ def _read_skills(result_dir: Path, available: list[str]) -> list[str]:
     return _reported_skills(result_dir, "read-skills.json", available)
 
 
-def _explicit_skills(message: str, available: list[str]) -> list[str]:
-    mentioned = set(re.findall(r"(?<![A-Za-z0-9_])\$([a-z][a-z0-9-]{0,63})\b", message))
-    return [name for name in available if name in mentioned]
-
-
 def _base_runner_config() -> str:
     candidates = (
         RUNNER_CONFIG_TEMPLATE,
@@ -260,8 +273,8 @@ def _active_count() -> int:
 
 
 def _create_task_files(repository: Repository, prompt: str, user_id: str,
-                       conversation_id: str | None = None, turn_id: str | None = None,
-                       current_message: str | None = None) -> dict:
+                       skill_ids: list[str], mcp_ids: list[str],
+                       conversation_id: str | None = None, turn_id: str | None = None) -> dict:
     """Caller holds _lock; both one-shot and conversational tasks use this path."""
     if not RUNNER_IMAGE or not os.environ.get("MODEL_API_KEY"):
         raise HTTPException(status_code=503, detail="Runner image or model key is missing")
@@ -275,16 +288,24 @@ def _create_task_files(repository: Repository, prompt: str, user_id: str,
         (job_dir / "repository-ref.txt").write_text(repository.ref, encoding="utf-8")
         (job_dir / "repository-refresh.txt").write_text("1" if repository.refresh else "0", encoding="utf-8")
         with _skill_lock:
-            task_skills = skill_store.snapshot(
-                skill_store.user_dir(DATA_DIR, user_id), TASK_DIR / task_id / "skills"
-            )
+            try:
+                task_skills = skill_store.snapshot(
+                    skill_store.user_dir(DATA_DIR, user_id), TASK_DIR / task_id / "skills", skill_ids
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=409, detail=f"Skill is not installed: {exc.args[0]}") from exc
         with session_factory()() as db:
-            task_mcps = mcp_store.installed_catalog(db, user_id)
+            try:
+                task_mcps = mcp_store.selected_catalog(db, user_id, mcp_ids)
+            except KeyError as exc:
+                raise HTTPException(status_code=409, detail=f"MCP is not installed: {exc.args[0]}") from exc
         (TASK_DIR / task_id / "codex-config.toml").write_text(
             mcp_store.render_codex_config(_base_runner_config(), task_mcps), encoding="utf-8"
         )
-        requested_skills = _explicit_skills(current_message or prompt, task_skills)
-        (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        requested_skills = list(task_skills)
+        native_prompt = (" ".join(f"${skill_id}" for skill_id in requested_skills) + "\n\n" + prompt
+                         if requested_skills else prompt)
+        (job_dir / "prompt.txt").write_text(native_prompt, encoding="utf-8")
         results = RESULT_DIR / task_id
         results.mkdir(parents=True)
         os.chown(results, 10001, 10001)
@@ -781,8 +802,8 @@ async def create_turn(conversation_id: str, body: TurnRequest, request: Request,
                 repository = Repository(url=conversation.repository_url,
                                         ref=conversation.repository_ref,
                                         refresh=conversation.repository_refresh)
-                task = _create_task_files(repository, prompt, user_id, conversation_id, turn_id,
-                                          current_message=message)
+                task = _create_task_files(repository, prompt, user_id, body.skill_ids, body.mcp_ids,
+                                          conversation_id, turn_id)
                 db.add(Turn(
                     id=turn_id, conversation_id=conversation_id, sequence=next_sequence,
                     request_id=body.request_id, user_message=message, task_id=task["task_id"],
@@ -805,7 +826,7 @@ async def create_turn(conversation_id: str, body: TurnRequest, request: Request,
 async def create_task(body: TaskRequest, request: Request, background_tasks: BackgroundTasks) -> dict:
     user_id = _user_id(request)
     with _lock:
-        task = _create_task_files(body.repository, body.prompt, user_id)
+        task = _create_task_files(body.repository, body.prompt, user_id, body.skill_ids, body.mcp_ids)
     background_tasks.add_task(_run_task, task["task_id"])
     return {
         "task_id": task["task_id"],

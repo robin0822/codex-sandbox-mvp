@@ -23,8 +23,13 @@ const state = {
   navigation: 0,
   toastTimer: null,
   skills: [],
+  installedSkills: [],
+  selectedSkillIds: new Set(),
   skillsPage: false,
   mcps: [],
+  installedMcps: [],
+  selectedMcpIds: new Set(),
+  capabilityTab: "skill",
   mcpPage: false,
 };
 
@@ -109,6 +114,112 @@ function validateProject() {
 function closeProject() {
   $("project-popover").classList.add("hidden");
   $("project-button").setAttribute("aria-expanded", "false");
+}
+
+function closeCapabilityPicker() {
+  $("capability-picker").classList.add("hidden");
+}
+
+async function loadInstalledCapabilities() {
+  const [skills, mcps] = await Promise.all([api("/v1/skills"), api("/v1/mcp")]);
+  state.installedSkills = skills.items;
+  state.installedMcps = mcps.items;
+  const skillIds = new Set(state.installedSkills.map((item) => item.id));
+  const mcpIds = new Set(state.installedMcps.map((item) => item.id));
+  state.selectedSkillIds = new Set([...state.selectedSkillIds].filter((id) => skillIds.has(id)));
+  state.selectedMcpIds = new Set([...state.selectedMcpIds].filter((id) => mcpIds.has(id)));
+}
+
+function capabilityItems() {
+  return state.capabilityTab === "skill" ? state.installedSkills : state.installedMcps;
+}
+
+function selectedCapabilityIds() {
+  return state.capabilityTab === "skill" ? state.selectedSkillIds : state.selectedMcpIds;
+}
+
+function renderCapabilitySelection() {
+  const skillCount = state.selectedSkillIds.size;
+  const mcpCount = state.selectedMcpIds.size;
+  $("selected-skill-count").textContent = skillCount;
+  $("selected-mcp-count").textContent = mcpCount;
+  $("composer-skill-count").textContent = skillCount;
+  $("composer-mcp-count").textContent = mcpCount;
+  $("composer-skill-count").classList.toggle("hidden", !skillCount);
+  $("composer-mcp-count").classList.toggle("hidden", !mcpCount);
+
+  const chips = $("capability-chips");
+  chips.replaceChildren();
+  const entries = [
+    ...state.installedSkills.filter((item) => state.selectedSkillIds.has(item.id)).map((item) => ["skill", item]),
+    ...state.installedMcps.filter((item) => state.selectedMcpIds.has(item.id)).map((item) => ["mcp", item]),
+  ];
+  for (const [kind, item] of entries) {
+    const chip = node("span", "capability-chip " + (kind === "mcp" ? "mcp" : ""));
+    chip.append(node("span", null, `${kind === "mcp" ? "⌘" : "✦"} ${item.name}`));
+    const remove = node("button", null, "×");
+    remove.type = "button";
+    remove.dataset.capabilityKind = kind;
+    remove.dataset.capabilityId = item.id;
+    remove.setAttribute("aria-label", `移除 ${item.name}`);
+    chip.append(remove);
+    chips.append(chip);
+  }
+  chips.classList.toggle("hidden", !entries.length);
+}
+
+function renderCapabilityOptions() {
+  const options = $("capability-options");
+  options.replaceChildren();
+  const query = $("capability-search").value.trim().toLowerCase();
+  const items = capabilityItems().filter((item) =>
+    `${item.name} ${item.description} ${item.id}`.toLowerCase().includes(query));
+  if (!items.length) {
+    options.append(node("p", "capability-empty", capabilityItems().length
+      ? "没有匹配的项目。" : `尚未安装${state.capabilityTab === "skill" ? "技能" : " MCP"}，请先前往广场安装。`));
+    return;
+  }
+  const selected = selectedCapabilityIds();
+  for (const item of items) {
+    const button = node("button", `capability-option ${state.capabilityTab === "mcp" ? "mcp " : ""}${selected.has(item.id) ? "selected" : ""}`);
+    button.type = "button";
+    button.dataset.capabilityId = item.id;
+    const icon = node("span", "capability-option-icon", state.capabilityTab === "mcp" ? "⌘" : "✦");
+    const copy = node("span", "capability-option-copy");
+    copy.append(node("strong", null, item.name), node("span", null, item.description));
+    button.append(icon, copy, node("span", "capability-check", "✓"));
+    options.append(button);
+  }
+}
+
+function setCapabilityTab(tab) {
+  state.capabilityTab = tab;
+  $("capability-skill-tab").classList.toggle("active", tab === "skill");
+  $("capability-mcp-tab").classList.toggle("active", tab === "mcp");
+  $("capability-search").value = "";
+  $("capability-search").placeholder = `搜索已安装的${tab === "skill" ? "技能" : " MCP"}…`;
+  $("capability-market").textContent = `前往${tab === "skill" ? "技能" : " MCP"}广场管理 ↗`;
+  renderCapabilitySelection();
+  renderCapabilityOptions();
+}
+
+async function openCapabilityPicker(tab) {
+  closeProject();
+  try {
+    await loadInstalledCapabilities();
+    setCapabilityTab(tab);
+    $("capability-picker").classList.remove("hidden");
+    $("capability-search").focus();
+  } catch (error) {
+    toast("能力列表加载失败：" + error.message);
+  }
+}
+
+function clearCapabilitySelection() {
+  state.selectedSkillIds.clear();
+  state.selectedMcpIds.clear();
+  renderCapabilitySelection();
+  closeCapabilityPicker();
 }
 
 function renderConversations() {
@@ -219,6 +330,7 @@ async function showSkillsView() {
   state.skillsPage = true;
   state.mcpPage = false;
   closeProject();
+  closeCapabilityPicker();
   $("chat-layout").classList.add("hidden");
   $("mcp-page").classList.add("hidden");
   $("skills-page").classList.remove("hidden");
@@ -231,6 +343,8 @@ async function showSkillsView() {
   $("skills-count").textContent = "正在加载技能…";
   try {
     await loadSkills();
+    await loadInstalledCapabilities();
+    renderCapabilitySelection();
   } catch (error) {
     $("skills-count").textContent = "技能加载失败";
     toast("技能加载失败：" + error.message);
@@ -282,6 +396,7 @@ async function showMcpView() {
   state.skillsPage = false;
   state.mcpPage = true;
   closeProject();
+  closeCapabilityPicker();
   $("chat-layout").classList.add("hidden");
   $("skills-page").classList.add("hidden");
   $("mcp-page").classList.remove("hidden");
@@ -294,6 +409,8 @@ async function showMcpView() {
   $("mcp-count").textContent = "正在加载 MCP…";
   try {
     await loadMcps();
+    await loadInstalledCapabilities();
+    renderCapabilitySelection();
   } catch (error) {
     $("mcp-count").textContent = "MCP 加载失败";
     toast("MCP 加载失败：" + error.message);
@@ -313,6 +430,8 @@ async function handleMcpAction(button) {
       toast(`已卸载“${mcp.name}”。`);
     }
     await loadMcps();
+    await loadInstalledCapabilities();
+    renderCapabilitySelection();
   } catch (error) {
     toast("操作失败：" + error.message);
     button.disabled = false;
@@ -324,10 +443,10 @@ async function handleSkillAction(button) {
   if (!skill) return;
   if (button.dataset.action === "use") {
     showChatView();
-    const input = $("prompt-input");
-    input.value = `$${skill.id} ` + input.value;
-    updatePromptCount();
-    input.focus();
+    state.selectedSkillIds.add(skill.id);
+    await loadInstalledCapabilities();
+    renderCapabilitySelection();
+    $("prompt-input").focus();
     return;
   }
   button.disabled = true;
@@ -340,6 +459,8 @@ async function handleSkillAction(button) {
       toast("已从你的技能目录卸载“" + skill.name + "”。");
     }
     await loadSkills();
+    await loadInstalledCapabilities();
+    renderCapabilitySelection();
   } catch (error) {
     toast("操作失败：" + error.message);
     button.disabled = false;
@@ -364,6 +485,7 @@ function newChat() {
   $("detail-button").disabled = true;
   $("detail-panel").classList.add("hidden");
   $("prompt-input").value = "";
+  clearCapabilitySelection();
   updatePromptCount();
   setProjectForm();
   renderConversations();
@@ -614,6 +736,7 @@ function updateComposer() {
 async function openConversation(id) {
   if (state.submitting) return toast("正在提交任务，请稍候。");
   closeStream();
+  clearCapabilitySelection();
   const navigation = ++state.navigation;
   $("sidebar").classList.remove("open");
   try {
@@ -735,6 +858,7 @@ async function sendPrompt() {
   state.submitting = true;
   updateComposer();
   closeProject();
+  closeCapabilityPicker();
   try {
     if (!state.activeConversation) {
       const conversation = await api("/v1/conversations", {
@@ -746,9 +870,11 @@ async function sendPrompt() {
       setProjectForm();
     }
     const conversationId = state.activeConversation.id;
+    const skillIds = [...state.selectedSkillIds];
+    const mcpIds = [...state.selectedMcpIds];
     const task = await api("/v1/conversations/" + conversationId + "/turns", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, request_id: crypto.randomUUID() }),
+      body: JSON.stringify({ message, request_id: crypto.randomUUID(), skill_ids: skillIds, mcp_ids: mcpIds }),
     });
     const turn = {
       id: task.turn_id, conversation_id: conversationId,
@@ -759,9 +885,12 @@ async function sendPrompt() {
     };
     state.turns.push(turn);
     $("prompt-input").value = "";
+    clearCapabilitySelection();
     updatePromptCount();
     renderTurns();
     addEvent(turn, { type: "system", title: "任务已创建", message: "正在启动独立 Runner。" });
+    if (skillIds.length) addEvent(turn, { type: "system", title: "已指定本轮技能", message: skillIds.map((id) => `$${id}`).join("、") });
+    if (mcpIds.length) addEvent(turn, { type: "system", title: "已指定本轮 MCP", message: mcpIds.join("、") });
     connectEvents(turn);
     loadConversations().catch(() => {});
   } catch (error) {
@@ -851,7 +980,8 @@ async function initialize() {
     $("account-button").textContent = identity.user_id;
     $("user-label").textContent = identity.user_id + " · 历史可查，模型只读最近 5 轮";
     $("login-overlay").classList.add("hidden");
-    await loadConversations();
+    await Promise.all([loadConversations(), loadInstalledCapabilities()]);
+    renderCapabilitySelection();
     const id = location.hash.slice(1);
     if (/^[0-9a-f]{32}$/.test(id)) await openConversation(id);
   } catch (error) {
@@ -874,9 +1004,32 @@ $("prompt-input").addEventListener("input", updatePromptCount);
 $("new-chat").addEventListener("click", newChat);
 $("nav-chat").addEventListener("click", showChatView);
 $("nav-skills").addEventListener("click", showSkillsView);
-$("composer-skills").addEventListener("click", showSkillsView);
+$("composer-skills").addEventListener("click", () => openCapabilityPicker("skill"));
 $("nav-mcp").addEventListener("click", showMcpView);
-$("composer-mcp").addEventListener("click", showMcpView);
+$("composer-mcp").addEventListener("click", () => openCapabilityPicker("mcp"));
+$("capability-close").addEventListener("click", closeCapabilityPicker);
+$("capability-skill-tab").addEventListener("click", () => setCapabilityTab("skill"));
+$("capability-mcp-tab").addEventListener("click", () => setCapabilityTab("mcp"));
+$("capability-search").addEventListener("input", renderCapabilityOptions);
+$("capability-options").addEventListener("click", (event) => {
+  const id = event.target.closest("[data-capability-id]")?.dataset.capabilityId;
+  if (!id) return;
+  const selected = selectedCapabilityIds();
+  if (selected.has(id)) selected.delete(id); else selected.add(id);
+  renderCapabilitySelection();
+  renderCapabilityOptions();
+});
+$("capability-chips").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-capability-id]");
+  if (!button) return;
+  const selected = button.dataset.capabilityKind === "mcp" ? state.selectedMcpIds : state.selectedSkillIds;
+  selected.delete(button.dataset.capabilityId);
+  renderCapabilitySelection();
+  if (!$("capability-picker").classList.contains("hidden")) renderCapabilityOptions();
+});
+$("capability-market").addEventListener("click", () => {
+  if (state.capabilityTab === "skill") showSkillsView(); else showMcpView();
+});
 $("skills-back").addEventListener("click", showChatView);
 $("mcp-back").addEventListener("click", showChatView);
 $("skills-grid").addEventListener("click", (event) => {
@@ -895,6 +1048,7 @@ $("load-conversations").addEventListener("click", () => loadConversations(false)
 $("load-older").addEventListener("click", loadOlder);
 $("project-button").addEventListener("click", () => {
   const willOpen = $("project-popover").classList.contains("hidden");
+  closeCapabilityPicker();
   closeProject();
   $("project-popover").classList.toggle("hidden", !willOpen);
   $("project-button").setAttribute("aria-expanded", String(willOpen));

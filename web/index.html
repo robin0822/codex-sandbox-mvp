@@ -109,12 +109,29 @@
 
           <div class="composer-zone">
             <div class="composer-wrap">
+              <section class="capability-picker hidden" id="capability-picker" aria-label="能力选择器">
+                <div class="capability-picker-head">
+                  <div><strong>选择本轮能力</strong><span>仅显示已安装项目</span></div>
+                  <button type="button" class="capability-close" id="capability-close" aria-label="关闭">×</button>
+                </div>
+                <div class="capability-tabs" role="tablist">
+                  <button type="button" id="capability-skill-tab" class="active" role="tab">技能 <b id="selected-skill-count">0</b></button>
+                  <button type="button" id="capability-mcp-tab" role="tab">MCP <b id="selected-mcp-count">0</b></button>
+                </div>
+                <input id="capability-search" class="capability-search" type="search" autocomplete="off" placeholder="搜索已安装的技能…" aria-label="搜索能力" />
+                <div class="capability-options" id="capability-options"></div>
+                <div class="capability-picker-foot">
+                  <span>选择只影响下一次发送的任务</span>
+                  <button type="button" id="capability-market">前往技能广场管理 ↗</button>
+                </div>
+              </section>
               <div class="composer" id="composer">
+                <div class="capability-chips hidden" id="capability-chips"></div>
                 <textarea id="prompt-input" rows="2" maxlength="20000" placeholder="向 Codex 提问，或描述你想完成的任务…" aria-label="输入你的问题"></textarea>
                 <div class="composer-bottom">
                   <div class="composer-tools">
-                    <button type="button" class="tool-button" id="composer-skills"><span>✦</span> 技能</button>
-                    <button type="button" class="tool-button" id="composer-mcp"><span>⌘</span> MCP</button>
+                    <button type="button" class="tool-button" id="composer-skills"><span>✦</span> 技能 <b id="composer-skill-count" class="hidden">0</b></button>
+                    <button type="button" class="tool-button" id="composer-mcp"><span>⌘</span> MCP <b id="composer-mcp-count" class="hidden">0</b></button>
                     <button type="button" class="tool-button future-feature" data-feature="知识库"><span>▤</span> 知识库</button>
                   </div>
                   <div class="send-actions">

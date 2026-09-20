@@ -115,10 +115,13 @@ def uninstall(user_root: Path, skill_id: str) -> bool:
     return True
 
 
-def snapshot(user_root: Path, task_root: Path) -> list[str]:
-    """Freeze one user's installed Skills for a new Runner."""
+def snapshot(user_root: Path, task_root: Path, selected_ids: list[str]) -> list[str]:
+    """Freeze only the selected installed Skills for a new Runner."""
     task_root.mkdir(parents=True)
-    skills = list_skills(user_root)
-    for skill in skills:
-        shutil.copytree(user_root / skill["id"], task_root / skill["id"])
-    return [skill["id"] for skill in skills]
+    installed = {skill["id"]: skill for skill in list_skills(user_root)}
+    missing = [skill_id for skill_id in selected_ids if skill_id not in installed]
+    if missing:
+        raise KeyError(missing[0])
+    for skill_id in selected_ids:
+        shutil.copytree(user_root / skill_id, task_root / skill_id)
+    return list(selected_ids)

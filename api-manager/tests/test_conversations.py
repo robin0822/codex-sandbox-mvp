@@ -16,11 +16,13 @@ class ConversationTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.prompts = []
+        bundle = Path(__file__).resolve().parents[2] / "skill-catalog" / "public"
         patches = [
             patch.object(main, "DATA_DIR", self.root),
             patch.object(main, "HOST_DATA_DIR", self.root),
             patch.object(main, "TASK_DIR", self.root / "tasks"),
             patch.object(main, "RESULT_DIR", self.root / "results"),
+            patch.object(main, "SKILL_BUNDLE_DIR", bundle),
             patch.object(main, "RUNNER_IMAGE", "runner:test"),
             patch.object(main.os, "chown"),
             patch.object(main, "_run_task", self.fake_run_task),
@@ -62,10 +64,15 @@ class ConversationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["id"]
 
-    def post_turn(self, conversation_id, message, headers=None, request_id=None):
+    def post_turn(self, conversation_id, message, headers=None, request_id=None,
+                  skill_ids=None, mcp_ids=None):
         body = {"message": message}
         if request_id:
             body["request_id"] = request_id
+        if skill_ids is not None:
+            body["skill_ids"] = skill_ids
+        if mcp_ids is not None:
+            body["mcp_ids"] = mcp_ids
         return self.client.post(
             f"/v1/conversations/{conversation_id}/turns", json=body, headers=headers or self.alice
         )
@@ -158,6 +165,27 @@ class ConversationTest(unittest.TestCase):
             self.client.get(f"/v1/conversations/{conversation_id}", headers=self.alice).json()["active_task_id"],
             first.json()["task_id"],
         )
+
+    def test_turn_passes_selected_native_capabilities_only(self):
+        self.client.post("/v1/skills/awesome-api-design/install", headers=self.alice)
+        self.client.post("/v1/skills/awesome-code-review/install", headers=self.alice)
+        self.client.post("/v1/mcp/context7/install", headers=self.alice)
+        self.client.post("/v1/mcp/wikipedia/install", headers=self.alice)
+        conversation_id = self.create_conversation()
+        response = self.post_turn(conversation_id, "设计接口", skill_ids=["awesome-api-design"],
+                                  mcp_ids=["context7"])
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        task = self.client.get(f"/v1/tasks/{task_id}", headers=self.alice).json()
+        self.assertEqual(task["skills"], ["awesome-api-design"])
+        self.assertEqual(task["mcps"], ["context7"])
+        self.assertTrue((self.root / "tasks" / task_id / "skills" /
+                         "awesome-api-design" / "SKILL.md").is_file())
+        self.assertFalse((self.root / "tasks" / task_id / "skills" / "awesome-code-review").exists())
+        config = (self.root / "tasks" / task_id / "codex-config.toml").read_text()
+        self.assertIn('[mcp_servers."context7"]', config)
+        self.assertNotIn('[mcp_servers."wikipedia"]', config)
+        self.assertTrue(self.prompts[-1].startswith("$awesome-api-design\n\n"))
 
 
 if __name__ == "__main__":

@@ -61,6 +61,7 @@ class McpMarketplaceTest(unittest.TestCase):
         prompt = "查询 FastAPI 的最新依赖注入文档"
         response = self.client.post("/v1/tasks", headers=self.alice, json={
             "repository": {"url": "https://example.com/repo.git"}, "prompt": prompt,
+            "mcp_ids": ["context7"],
         })
         self.assertEqual(response.status_code, 202, response.text)
         task_id = response.json()["task_id"]
@@ -68,11 +69,17 @@ class McpMarketplaceTest(unittest.TestCase):
         self.assertEqual((job / "prompt.txt").read_text(), prompt)
         config = (self.root / "tasks" / task_id / "codex-config.toml").read_text()
         self.assertIn('[mcp_servers."context7"]', config)
-        self.assertIn('[mcp_servers."wikipedia"]', config)
+        self.assertNotIn('[mcp_servers."wikipedia"]', config)
         self.assertIn('enabled_tools = ["resolve-library-id", "query-docs"]', config)
         self.assertNotIn("FastAPI", config)
         task = self.client.get(f"/v1/tasks/{task_id}", headers=self.alice).json()
-        self.assertEqual(task["mcps"], ["context7", "wikipedia"])
+        self.assertEqual(task["mcps"], ["context7"])
+        with patch.object(main, "MAX_ACTIVE_TASKS", 2):
+            rejected = self.client.post("/v1/tasks", headers=self.bob, json={
+                "repository": {"url": "https://example.com/repo.git"}, "prompt": prompt,
+                "mcp_ids": ["context7"],
+            })
+        self.assertEqual(rejected.status_code, 409)
 
     def test_unknown_mcp_and_config_renderer(self):
         self.assertEqual(self.client.post("/v1/mcp/unknown/install", headers=self.alice).status_code, 404)
