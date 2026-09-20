@@ -4,7 +4,8 @@
 data
 vendor
 web
-runner
+runner/*
+!runner/config.toml
 api-manager/tests
 **/__pycache__
 **/*.pyc
