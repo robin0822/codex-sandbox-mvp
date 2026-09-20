@@ -198,7 +198,7 @@ function setCapabilityTab(tab) {
   $("capability-mcp-tab").classList.toggle("active", tab === "mcp");
   $("capability-search").value = "";
   $("capability-search").placeholder = `搜索已安装的${tab === "skill" ? "技能" : " MCP"}…`;
-  $("capability-market").textContent = `前往${tab === "skill" ? "技能" : " MCP"}广场管理 ↗`;
+  $("capability-market").textContent = tab === "skill" ? "前往技能广场管理 ↗" : "前往 MCP 广场管理 ↗";
   renderCapabilitySelection();
   renderCapabilityOptions();
 }
