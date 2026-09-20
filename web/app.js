@@ -614,6 +614,15 @@ function renderEvent(item, parent) {
   parent.scrollTop = parent.scrollHeight;
 }
 
+function followLiveOutput(turn) {
+  const running = turn.status === "starting" || turn.status === "running";
+  if (!running || state.liveTurnId !== turn.id) return;
+  requestAnimationFrame(() => {
+    const scroll = $("chat-scroll");
+    scroll.scrollTop = scroll.scrollHeight;
+  });
+}
+
 function addEvent(turn, event, envelope = null) {
   const detail = describeEvent(event);
   const item = {
@@ -632,6 +641,7 @@ function addEvent(turn, event, envelope = null) {
     turn.progressOpen = true;
     renderTurns(false);
   } else if (card) card.replaceWith(renderProgress(turn));
+  followLiveOutput(turn);
 }
 
 function renderProgress(turn) {
