@@ -61,7 +61,7 @@ MCP 广场包含七个经过 `initialize`、`tools/list` 和代表性 `tools/cal
 | `POST /v1/mcp/{mcp-id}/install` | 安装一个已审核 MCP |
 | `DELETE /v1/mcp/{mcp-id}` | 卸载当前用户的 MCP |
 
-创建任务时，Manager 查询该用户当时已安装的 MCP，把原始 Runner 配置复制为任务配置，并追加原生 `[mcp_servers."..."]` 表。该文件只读挂载到 Runner 的 `/home/codex/.codex/config.toml`，任务结束后删除。Codex 启动后自行执行 MCP `initialize`、`tools/list` 和 `tools/call`，并通过 Responses API 的结构化工具字段把工具提供给模型；Manager 不向用户 Prompt 追加 MCP 名称、说明或调用规则。
+创建任务时，手动选择的 MCP 优先；没有手动选择时，Manager 根据本轮问题自动匹配当前用户已安装的 MCP，例如新闻、最新资料和网页搜索会选择 Exa，论文会选择 arXiv，开发文档会选择 Context7。Manager 把原始 Runner 配置复制为任务配置，并为匹配结果追加原生 `[mcp_servers."..."]` 表。该文件只读挂载到 Runner 的 `/home/codex/.codex/config.toml`，任务结束后删除。Codex 启动后自行执行 MCP `initialize`、`tools/list` 和 `tools/call`，并通过 Responses API 的结构化工具字段把工具提供给模型；Manager 不向用户 Prompt 追加 MCP 名称、说明或调用规则。自动路由只负责暴露相关工具，是否实际调用仍由 Codex 根据问题和工具描述决定。
 
 安装状态只影响之后创建的任务。运行时原生 `mcp_tool_call` 的开始、完成和失败状态会随 Codex JSONL 进入现有 SSE，前端在执行进度中直接展示。公共 Registry 里的条目不会自动发布到广场；新增条目应先核对来源、认证方式、工具权限、连接状态和实际调用结果。
 

@@ -330,7 +330,8 @@ def _active_count() -> int:
 def _create_task_files(repository: Repository | None, prompt: str, user_id: str,
                        skill_ids: list[str], mcp_ids: list[str],
                        conversation_id: str | None = None, turn_id: str | None = None,
-                       execution_mode: str = "repository_snapshot", turn_sequence: int | None = None) -> dict:
+                       execution_mode: str = "repository_snapshot", turn_sequence: int | None = None,
+                       mcp_routing_text: str | None = None) -> dict:
     """Caller holds _lock; both one-shot and conversational tasks use this path."""
     if not RUNNER_IMAGE or not os.environ.get("MODEL_API_KEY"):
         raise HTTPException(status_code=503, detail="Runner image or model key is missing")
@@ -356,7 +357,12 @@ def _create_task_files(repository: Repository | None, prompt: str, user_id: str,
                 raise HTTPException(status_code=409, detail=f"Skill is not installed: {exc.args[0]}") from exc
         with session_factory()() as db:
             try:
-                task_mcps = mcp_store.selected_catalog(db, user_id, mcp_ids)
+                if mcp_ids:
+                    task_mcps = mcp_store.selected_catalog(db, user_id, mcp_ids)
+                    mcp_selection = "manual"
+                else:
+                    task_mcps = mcp_store.routed_catalog(db, user_id, mcp_routing_text or prompt)
+                    mcp_selection = "auto" if task_mcps else "none"
             except KeyError as exc:
                 raise HTTPException(status_code=409, detail=f"MCP is not installed: {exc.args[0]}") from exc
         (TASK_DIR / task_id / "codex-config.toml").write_text(
@@ -375,6 +381,8 @@ def _create_task_files(repository: Repository | None, prompt: str, user_id: str,
             "execution_mode": execution_mode, "turn_sequence": turn_sequence,
             "skills": task_skills, "requested_skills": requested_skills,
             "mcps": [item.id for item in task_mcps],
+            "mcp_selection": mcp_selection,
+            "auto_mcps": [item.id for item in task_mcps] if mcp_selection == "auto" else [],
         }
         _write_task(task)
         return task
@@ -1042,6 +1050,7 @@ async def create_turn(conversation_id: str, body: TurnRequest, request: Request,
                 task = _create_task_files(
                     repository, prompt, user_id, body.skill_ids, body.mcp_ids,
                     conversation_id, turn_id, conversation.workspace_type, next_sequence,
+                    mcp_routing_text=message,
                 )
                 db.add(Turn(
                     id=turn_id, conversation_id=conversation_id, sequence=next_sequence,
@@ -1058,6 +1067,8 @@ async def create_turn(conversation_id: str, body: TurnRequest, request: Request,
             raise
     background_tasks.add_task(_run_task, task["task_id"])
     return {"turn_id": turn_id, "task_id": task["task_id"], "context_rounds_used": rounds,
+            "mcps": task.get("mcps", []), "mcp_selection": task.get("mcp_selection", "none"),
+            "auto_mcps": task.get("auto_mcps", []),
             "links": _task_links(task["task_id"])}
 
 

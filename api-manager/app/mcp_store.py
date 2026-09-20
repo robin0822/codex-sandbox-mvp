@@ -1,6 +1,7 @@
 """Curated remote MCP catalog and per-user installation records."""
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -129,6 +130,27 @@ CATALOG = (
 BY_ID = {item.id: item for item in CATALOG}
 MAX_INSTALLED = 10
 
+# MCPs are still loaded through Codex's native config. These rules only decide
+# which installed servers should be exposed to a turn when the user did not
+# make an explicit selection.
+AUTO_ROUTE_PATTERNS = (
+    ("weather-data", re.compile(
+        r"(?:天气|气温|降雨|下雨|台风|地震|海拔|weather|forecast|earthquake|elevation)", re.I)),
+    ("arxiv", re.compile(
+        r"(?:arxiv|预印本|论文|学术研究|paper|preprint|literature review)", re.I)),
+    ("wikipedia", re.compile(
+        r"(?:维基|百科|wikipedia|encyclop(?:a)?edia)", re.I)),
+    ("qt-docs", re.compile(r"(?:\bqt(?:\s*6)?\b|qt quick|qml|qt creator)", re.I)),
+    ("vonage-docs", re.compile(r"(?:vonage|nexmo)", re.I)),
+    ("context7", re.compile(
+        r"(?:开发文档|官方文档|接口文档|API\s*(?:文档|reference)|documentation|"
+        r"library docs|framework docs|SDK\s*(?:文档|documentation))", re.I)),
+    ("exa-search", re.compile(
+        r"(?:联网|上网|网页|网站|全网|搜索|查找|检索|新闻|资讯|最新|最近|近期|"
+        r"今天|今日|当前|实时|刚刚|现在|web\s*search|search\s+the\s+web|"
+        r"latest|recent|current|today|news|online)", re.I)),
+)
+
 
 def installed_ids(db, user_id: str) -> set[str]:
     return set(db.scalars(select(UserMcpInstallation.mcp_id).where(
@@ -149,6 +171,16 @@ def selected_catalog(db, user_id: str, selected_ids: list[str]) -> list[CatalogM
     if missing:
         raise KeyError(missing[0])
     return [BY_ID[mcp_id] for mcp_id in selected_ids]
+
+
+def routed_catalog(db, user_id: str, text: str) -> list[CatalogMcp]:
+    """Select relevant installed MCPs for a turn, preserving rule priority."""
+    installed = installed_ids(db, user_id)
+    matches = []
+    for mcp_id, pattern in AUTO_ROUTE_PATTERNS:
+        if mcp_id in installed and pattern.search(text):
+            matches.append(BY_ID[mcp_id])
+    return matches
 
 
 def install(db, user_id: str, mcp_id: str) -> bool:

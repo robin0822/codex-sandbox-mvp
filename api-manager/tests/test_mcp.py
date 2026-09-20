@@ -95,6 +95,34 @@ class McpMarketplaceTest(unittest.TestCase):
         self.assertIn('url = "https://mcp.exa.ai/mcp"', exa)
         self.assertIn('enabled_tools = ["web_search_exa", "web_fetch_exa"]', exa)
 
+    def test_installed_mcp_is_automatically_routed_without_prompt_injection(self):
+        self.client.post("/v1/mcp/exa-search/install", headers=self.alice)
+        prompt = "帮我整理最近的 Agent 智能体相关新闻"
+        response = self.client.post("/v1/tasks", headers=self.alice, json={
+            "repository": {"url": "https://example.com/repo.git"}, "prompt": prompt,
+        })
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        task = self.client.get(f"/v1/tasks/{task_id}", headers=self.alice).json()
+        self.assertEqual(task["mcps"], ["exa-search"])
+        self.assertEqual(task["mcp_selection"], "auto")
+        self.assertEqual(task["auto_mcps"], ["exa-search"])
+        self.assertEqual((self.root / "tasks" / task_id / "job" / "prompt.txt").read_text(), prompt)
+        config = (self.root / "tasks" / task_id / "codex-config.toml").read_text()
+        self.assertIn('[mcp_servers."exa-search"]', config)
+
+    def test_manual_mcp_selection_takes_priority_over_auto_routing(self):
+        self.client.post("/v1/mcp/exa-search/install", headers=self.alice)
+        self.client.post("/v1/mcp/context7/install", headers=self.alice)
+        response = self.client.post("/v1/tasks", headers=self.alice, json={
+            "repository": {"url": "https://example.com/repo.git"},
+            "prompt": "搜索最新的 FastAPI 文档", "mcp_ids": ["context7"],
+        })
+        task = self.client.get(f"/v1/tasks/{response.json()['task_id']}", headers=self.alice).json()
+        self.assertEqual(task["mcps"], ["context7"])
+        self.assertEqual(task["mcp_selection"], "manual")
+        self.assertEqual(task["auto_mcps"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

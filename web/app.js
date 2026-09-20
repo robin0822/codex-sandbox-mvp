@@ -940,6 +940,9 @@ async function sendPrompt() {
     addEvent(turn, { type: "system", title: "任务已创建", message: "正在启动独立 Runner。" });
     if (skillIds.length) addEvent(turn, { type: "system", title: "已指定本轮技能", message: skillIds.map((id) => `$${id}`).join("、") });
     if (mcpIds.length) addEvent(turn, { type: "system", title: "已指定本轮 MCP", message: mcpIds.join("、") });
+    if (!mcpIds.length && task.auto_mcps?.length) {
+      addEvent(turn, { type: "system", title: "已自动加载 MCP", message: task.auto_mcps.join("、") });
+    }
     connectEvents(turn);
     loadConversations().catch(() => {});
   } catch (error) {

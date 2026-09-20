@@ -238,6 +238,17 @@ class ConversationTest(unittest.TestCase):
         self.assertNotIn('[mcp_servers."wikipedia"]', config)
         self.assertTrue(self.prompts[-1].startswith("$awesome-api-design\n\n"))
 
+    def test_turn_automatically_routes_installed_search_mcp(self):
+        self.client.post("/v1/mcp/exa-search/install", headers=self.alice)
+        conversation_id = self.create_conversation()
+        response = self.post_turn(conversation_id, "查询最近的 Agent 智能体相关新闻")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["mcps"], ["exa-search"])
+        self.assertEqual(response.json()["mcp_selection"], "auto")
+        task_id = response.json()["task_id"]
+        config = (self.root / "tasks" / task_id / "codex-config.toml").read_text()
+        self.assertIn('[mcp_servers."exa-search"]', config)
+
 
 if __name__ == "__main__":
     unittest.main()
