@@ -29,6 +29,8 @@ class FakeApi(BaseHTTPRequestHandler):
             self._json(200, {"items": [], "has_more": False})
         elif self.path == "/v1/skills/catalog":
             self._json(200, {"items": [{"id": "awesome-api-design", "installed": False}]})
+        elif self.path == "/v1/mcp/catalog":
+            self._json(200, {"items": [{"id": "context7", "installed": False}]})
         elif self.path == "/v1/tasks/abc/events":
             type(self).last_event_id = self.headers.get("Last-Event-ID")
             type(self).authorization = self.headers.get("Authorization")
@@ -170,6 +172,14 @@ class LocalPreviewTest(unittest.TestCase):
             self.assertEqual(response.status, 202)
         with urlopen(Request(self.base + "/v1/skills/awesome-api-design", method="DELETE")) as response:
             self.assertFalse(json.load(response)["installed"])
+
+    def test_mcp_marketplace_routes_include_install_and_delete(self):
+        with urlopen(self.base + "/v1/mcp/catalog") as response:
+            self.assertEqual(json.load(response)["items"][0]["id"], "context7")
+        with urlopen(Request(self.base + "/v1/mcp/context7/install", data=b"", method="POST")) as response:
+            self.assertEqual(response.status, 202)
+        with urlopen(Request(self.base + "/v1/mcp/context7", method="DELETE")) as response:
+            self.assertEqual(response.status, 200)
 
 
 if __name__ == "__main__":

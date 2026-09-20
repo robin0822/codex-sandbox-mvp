@@ -26,7 +26,7 @@
         <nav class="side-nav" aria-label="工作台功能">
           <button type="button" class="nav-item selected" id="nav-chat"><span class="nav-icon">◫</span> 对话工作台</button>
           <button type="button" class="nav-item" id="nav-skills"><span class="nav-icon">✦</span> 技能广场</button>
-          <button type="button" class="nav-item future-feature" data-feature="MCP 连接"><span class="nav-icon">⌘</span> MCP 连接 <small>即将接入</small></button>
+          <button type="button" class="nav-item" id="nav-mcp"><span class="nav-icon">⌘</span> MCP 广场</button>
           <button type="button" class="nav-item future-feature" data-feature="知识库"><span class="nav-icon">▤</span> 知识库 <small>即将接入</small></button>
         </nav>
 
@@ -78,6 +78,15 @@
           <div class="skills-grid" id="skills-grid"></div>
         </main>
 
+        <main class="skills-page hidden" id="mcp-page" aria-label="MCP 广场">
+          <div class="skills-page-head">
+            <div><span class="skills-kicker">MCP MARKETPLACE</span><h1>MCP 广场</h1><p>安装后由 Codex 原生连接远程 MCP。工具通过结构化协议加载，不会写入用户提示词。</p></div>
+            <button type="button" class="skills-back" id="mcp-back">返回对话</button>
+          </div>
+          <div class="skills-count" id="mcp-count">正在加载 MCP…</div>
+          <div class="skills-grid" id="mcp-grid"></div>
+        </main>
+
         <main class="chat-layout" id="chat-layout">
           <div class="chat-scroll" id="chat-scroll">
             <section class="welcome" id="welcome">
@@ -105,7 +114,7 @@
                 <div class="composer-bottom">
                   <div class="composer-tools">
                     <button type="button" class="tool-button" id="composer-skills"><span>✦</span> 技能</button>
-                    <button type="button" class="tool-button future-feature" data-feature="MCP 连接"><span>⌘</span> MCP</button>
+                    <button type="button" class="tool-button" id="composer-mcp"><span>⌘</span> MCP</button>
                     <button type="button" class="tool-button future-feature" data-feature="知识库"><span>▤</span> 知识库</button>
                   </div>
                   <div class="send-actions">

@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import main, skill_store
+from app.conversation_store import session_factory
 
 
 class SkillMarketplaceTest(unittest.TestCase):
@@ -27,12 +28,15 @@ class SkillMarketplaceTest(unittest.TestCase):
             patch.object(main, "_run_task", lambda _task_id: None),
             patch.dict(main.os.environ, {
                 "MODEL_API_KEY": "test-model-key",
+                "DATABASE_URL": f"sqlite:///{self.root / 'conversations.sqlite3'}",
                 "USER_API_KEYS_JSON": json.dumps({"alice": "alice-secret", "bob": "bob-secret"}),
             }),
         ]
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
+        session_factory.cache_clear()
+        self.addCleanup(session_factory.cache_clear)
         self.client = TestClient(main.app)
         self.alice = {"Authorization": "Bearer alice-secret"}
         self.bob = {"Authorization": "Bearer bob-secret"}

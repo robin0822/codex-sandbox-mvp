@@ -24,6 +24,8 @@ const state = {
   toastTimer: null,
   skills: [],
   skillsPage: false,
+  mcps: [],
+  mcpPage: false,
 };
 
 function toast(message) {
@@ -162,10 +164,13 @@ function closeStream() {
 
 function showChatView() {
   state.skillsPage = false;
+  state.mcpPage = false;
   $("skills-page").classList.add("hidden");
+  $("mcp-page").classList.add("hidden");
   $("chat-layout").classList.remove("hidden");
   $("nav-chat").classList.add("selected");
   $("nav-skills").classList.remove("selected");
+  $("nav-mcp").classList.remove("selected");
   $("top-title").textContent = shortTitle(state.activeConversation?.title);
   $("top-subtitle").textContent = "同一窗口记住最近 5 轮问答";
   $("sidebar").classList.remove("open");
@@ -212,11 +217,14 @@ async function loadSkills() {
 
 async function showSkillsView() {
   state.skillsPage = true;
+  state.mcpPage = false;
   closeProject();
   $("chat-layout").classList.add("hidden");
+  $("mcp-page").classList.add("hidden");
   $("skills-page").classList.remove("hidden");
   $("nav-chat").classList.remove("selected");
   $("nav-skills").classList.add("selected");
+  $("nav-mcp").classList.remove("selected");
   $("top-title").textContent = "技能广场";
   $("top-subtitle").textContent = "公共目录 · 用户独立安装";
   $("sidebar").classList.remove("open");
@@ -226,6 +234,88 @@ async function showSkillsView() {
   } catch (error) {
     $("skills-count").textContent = "技能加载失败";
     toast("技能加载失败：" + error.message);
+  }
+}
+
+function renderMcps() {
+  const grid = $("mcp-grid");
+  grid.replaceChildren();
+  const installed = state.mcps.filter((mcp) => mcp.installed).length;
+  $("mcp-count").textContent = `公共 MCP ${state.mcps.length} 项 · 已安装 ${installed} 项`;
+  if (!state.mcps.length) {
+    grid.append(node("p", "history-empty", "当前没有已审核的 MCP。"));
+    return;
+  }
+  for (const mcp of state.mcps) {
+    const card = node("article", "skill-card mcp-card");
+    const top = node("div", "skill-card-top");
+    top.append(node("span", "skill-category", mcp.category || "MCP"));
+    if (mcp.installed) top.append(node("span", "skill-installed", "✓ 已安装"));
+    const toolText = `${mcp.tools.length} 个工具 · ${mcp.transport}`;
+    card.append(top, node("h2", null, mcp.name), node("p", null, mcp.description),
+      node("div", "mcp-meta", toolText));
+    const actions = node("div", "skill-card-actions");
+    const action = node("button", mcp.installed ? "remove" : "primary", mcp.installed ? "卸载" : "安装 MCP");
+    action.type = "button";
+    action.dataset.mcpId = mcp.id;
+    action.dataset.action = mcp.installed ? "remove" : "install";
+    actions.append(action);
+    if (mcp.repository_url) {
+      const source = node("a", "mcp-source", "查看源码 ↗");
+      source.href = mcp.repository_url;
+      source.target = "_blank";
+      source.rel = "noreferrer";
+      actions.append(source);
+    }
+    card.append(actions);
+    grid.append(card);
+  }
+}
+
+async function loadMcps() {
+  const result = await api("/v1/mcp/catalog");
+  state.mcps = result.items;
+  renderMcps();
+}
+
+async function showMcpView() {
+  state.skillsPage = false;
+  state.mcpPage = true;
+  closeProject();
+  $("chat-layout").classList.add("hidden");
+  $("skills-page").classList.add("hidden");
+  $("mcp-page").classList.remove("hidden");
+  $("nav-chat").classList.remove("selected");
+  $("nav-skills").classList.remove("selected");
+  $("nav-mcp").classList.add("selected");
+  $("top-title").textContent = "MCP 广场";
+  $("top-subtitle").textContent = "Codex 原生协议 · 用户独立安装";
+  $("sidebar").classList.remove("open");
+  $("mcp-count").textContent = "正在加载 MCP…";
+  try {
+    await loadMcps();
+  } catch (error) {
+    $("mcp-count").textContent = "MCP 加载失败";
+    toast("MCP 加载失败：" + error.message);
+  }
+}
+
+async function handleMcpAction(button) {
+  const mcp = state.mcps.find((item) => item.id === button.dataset.mcpId);
+  if (!mcp) return;
+  button.disabled = true;
+  try {
+    if (button.dataset.action === "install") {
+      await api("/v1/mcp/" + mcp.id + "/install", { method: "POST" });
+      toast(`已安装“${mcp.name}”，新任务将由 Codex 原生加载。`);
+    } else {
+      await api("/v1/mcp/" + mcp.id, { method: "DELETE" });
+      toast(`已卸载“${mcp.name}”。`);
+    }
+    await loadMcps();
+  } catch (error) {
+    toast("操作失败：" + error.message);
+    button.disabled = false;
   }
 }
 
@@ -355,7 +445,14 @@ function describeEvent(event) {
     return { title: "运行提示", desc: item.message || "", kind: "error" };
   }
   if (type.startsWith("item.") && item.type === "mcp_tool_call") {
-    return { title: "调用 MCP 工具", desc: `${item.server || ""} / ${item.tool || ""}`, kind: "command" };
+    const running = type === "item.started" || item.status === "in_progress";
+    const failed = item.status === "failed" || item.error;
+    return {
+      title: failed ? "MCP 工具调用失败" : running ? "正在调用 MCP 工具" : "MCP 工具调用完成",
+      desc: `${item.server || ""} / ${item.tool || ""}`,
+      output: failed ? (item.error?.message || String(item.error)) : "",
+      kind: failed ? "error" : "mcp",
+    };
   }
   if (type.startsWith("item.") && item.type === "web_search") {
     return { title: "联网搜索", desc: JSON.stringify(item.action || {}), kind: "command" };
@@ -502,7 +599,7 @@ function renderTurns(scrollBottom = true) {
   const list = $("turn-list");
   list.replaceChildren();
   for (const turn of state.turns) list.append(renderTurn(turn));
-  if (!state.skillsPage) $("top-title").textContent = shortTitle(state.activeConversation?.title);
+  if (!state.skillsPage && !state.mcpPage) $("top-title").textContent = shortTitle(state.activeConversation?.title);
   $("detail-button").disabled = !state.selectedTurn;
   updateComposer();
   if (scrollBottom) $("chat-scroll").scrollTop = $("chat-scroll").scrollHeight;
@@ -693,6 +790,7 @@ async function openDetails(turn) {
       ["本轮显式指定", result.requested_skills?.length ? result.requested_skills.join("、") : "无"],
       ["Codex 原生加载", result.loaded_skills?.length ? result.loaded_skills.join("、") : "无记录"],
       ["命令读取技能文件", result.read_skills?.length ? result.read_skills.join("、") : "无记录"],
+      ["本轮原生 MCP", result.mcps?.length ? result.mcps.join("、") : "无"],
       ["缓存", result.repository?.cache_hit ? "已命中" : "首次创建"],
       ["总耗时", formatMs(result.timings_ms?.total)],
       ["Codex 执行", formatMs(result.timings_ms?.codex)],
@@ -777,10 +875,17 @@ $("new-chat").addEventListener("click", newChat);
 $("nav-chat").addEventListener("click", showChatView);
 $("nav-skills").addEventListener("click", showSkillsView);
 $("composer-skills").addEventListener("click", showSkillsView);
+$("nav-mcp").addEventListener("click", showMcpView);
+$("composer-mcp").addEventListener("click", showMcpView);
 $("skills-back").addEventListener("click", showChatView);
+$("mcp-back").addEventListener("click", showChatView);
 $("skills-grid").addEventListener("click", (event) => {
   const button = event.target.closest("[data-skill-id]");
   if (button) handleSkillAction(button);
+});
+$("mcp-grid").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-mcp-id]");
+  if (button) handleMcpAction(button);
 });
 $("history-list").addEventListener("click", (event) => {
   const id = event.target.closest("[data-conversation-id]")?.dataset.conversationId;

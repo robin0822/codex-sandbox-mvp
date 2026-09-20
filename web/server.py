@@ -152,14 +152,16 @@ class Handler(SimpleHTTPRequestHandler):
             self._logout()
         elif path in ("/v1/tasks", "/v1/conversations") or re.fullmatch(
             r"/v1/conversations/[0-9a-f]{32}/turns", path
-        ) or re.fullmatch(r"/v1/skills/[a-z][a-z0-9-]{0,63}/install", path):
+        ) or re.fullmatch(r"/v1/skills/[a-z][a-z0-9-]{0,63}/install", path) or re.fullmatch(
+            r"/v1/mcp/[a-z][a-z0-9-]{0,63}/install", path
+        ):
             self._proxy()
         else:
             self.send_error(404)
 
     def do_DELETE(self):
         path = urlsplit(self.path).path
-        if re.fullmatch(r"/v1/skills/[a-z][a-z0-9-]{0,63}", path):
+        if re.fullmatch(r"/v1/(?:skills|mcp)/[a-z][a-z0-9-]{0,63}", path):
             self._proxy()
         else:
             self.send_error(404)

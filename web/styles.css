@@ -107,6 +107,9 @@ button { cursor: pointer; }
 .skill-card-actions button.primary { border-color: #4d72d4; background: #4d72d4; color: #fff; }
 .skill-card-actions button:disabled { opacity: .55; cursor: wait; }
 .skill-card-actions button:hover:not(:disabled) { filter: brightness(.96); }
+.mcp-meta { margin-top: 12px; color: #7489b7; font-size: 10px; }
+.mcp-source { margin-left: auto; align-self: center; color: #7892c9; font-size: 10px; text-decoration: none; }
+.mcp-source:hover { text-decoration: underline; }
 .skill-card-actions button.remove { margin-left: auto; color: #9a7c85; }
 
 .chat-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -153,6 +156,7 @@ button { cursor: pointer; }
 .event-item.message .event-dot { border-color: #4abc8e; }
 .event-item.error .event-dot { border-color: #e3858d; }
 .event-item.skill .event-dot { border-color: #e4a75b; }
+.event-item.mcp .event-dot { border-color: #6f8fdf; }
 .event-item.reasoning .event-dot { border-color: #6988d7; }
 .event-title { color: #52627b; font-size: 10px; font-weight: 700; }
 .event-desc { margin-top: 4px; color: #8290a3; font-size: 10px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }

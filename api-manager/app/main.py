@@ -21,16 +21,17 @@ from sqlalchemy import func, select
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 
 from app.conversation_store import Conversation, Turn, session_factory, utcnow
-from app import skill_store
+from app import mcp_store, skill_store
 
 
-app = FastAPI(title="Codex Sandbox MVP", version="0.5.0")
+app = FastAPI(title="Codex Sandbox MVP", version="0.6.0")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.environ.get("HOST_DATA_DIR", "/data/codex-mvp"))
 TASK_DIR = DATA_DIR / "tasks"
 RESULT_DIR = DATA_DIR / "results"
 REPO_CACHE_DIR = DATA_DIR / "repo-cache"
 SKILL_BUNDLE_DIR = Path(os.environ.get("SKILL_BUNDLE_DIR", "/app/bundled-skills"))
+RUNNER_CONFIG_TEMPLATE = Path(os.environ.get("RUNNER_CONFIG_TEMPLATE", "/app/runner-config.toml"))
 MAX_ACTIVE_TASKS = int(os.environ.get("MAX_ACTIVE_TASKS", "1"))
 RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "")
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "180"))
@@ -232,6 +233,17 @@ def _explicit_skills(message: str, available: list[str]) -> list[str]:
     return [name for name in available if name in mentioned]
 
 
+def _base_runner_config() -> str:
+    candidates = (
+        RUNNER_CONFIG_TEMPLATE,
+        Path(__file__).resolve().parents[2] / "runner" / "config.toml",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    raise RuntimeError("Runner config template is missing")
+
+
 def _write_task(task: dict) -> None:
     path = _task_file(task["task_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -266,6 +278,11 @@ def _create_task_files(repository: Repository, prompt: str, user_id: str,
             task_skills = skill_store.snapshot(
                 skill_store.user_dir(DATA_DIR, user_id), TASK_DIR / task_id / "skills"
             )
+        with session_factory()() as db:
+            task_mcps = mcp_store.installed_catalog(db, user_id)
+        (TASK_DIR / task_id / "codex-config.toml").write_text(
+            mcp_store.render_codex_config(_base_runner_config(), task_mcps), encoding="utf-8"
+        )
         requested_skills = _explicit_skills(current_message or prompt, task_skills)
         (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         results = RESULT_DIR / task_id
@@ -275,6 +292,7 @@ def _create_task_files(repository: Repository, prompt: str, user_id: str,
             "task_id": task_id, "status": "starting", "created_at": _now(),
             "user_id": user_id, "conversation_id": conversation_id, "turn_id": turn_id,
             "skills": task_skills, "requested_skills": requested_skills,
+            "mcps": [item.id for item in task_mcps],
         }
         _write_task(task)
         return task
@@ -461,6 +479,9 @@ def _run_task(task_id: str) -> None:
                 str(HOST_DATA_DIR / "tasks" / task_id / "skills"): {
                     "bind": "/home/codex/.agents/skills", "mode": "ro"
                 },
+                str(HOST_DATA_DIR / "tasks" / task_id / "codex-config.toml"): {
+                    "bind": "/home/codex/.codex/config.toml", "mode": "ro"
+                },
             },
             labels={"codex.mvp.managed": "true", "codex.mvp.task_id": task_id},
             mem_limit="2g",
@@ -505,6 +526,7 @@ def _run_task(task_id: str) -> None:
         _write_task(task)
         if "cleanup_error" not in task:
             shutil.rmtree(TASK_DIR / task_id / "skills", ignore_errors=True)
+            (TASK_DIR / task_id / "codex-config.toml").unlink(missing_ok=True)
         try:
             _sync_turn_from_task(task)
         except Exception as exc:
@@ -591,6 +613,51 @@ async def uninstall_skill(skill_id: str, request: Request) -> dict:
     if not removed:
         raise HTTPException(status_code=404, detail="skill not installed")
     return {"id": skill_id, "installed": False}
+
+
+@app.get("/v1/mcp/catalog")
+async def list_mcp_catalog(request: Request) -> dict:
+    user_id = _user_id(request)
+    with session_factory()() as db:
+        installed = mcp_store.installed_ids(db, user_id)
+    return {"items": [
+        {**item.public_data(), "installed": item.id in installed}
+        for item in mcp_store.CATALOG
+    ]}
+
+
+@app.get("/v1/mcp")
+async def list_user_mcps(request: Request) -> dict:
+    user_id = _user_id(request)
+    with session_factory()() as db:
+        items = mcp_store.installed_catalog(db, user_id)
+    return {"items": [{**item.public_data(), "installed": True} for item in items]}
+
+
+@app.post("/v1/mcp/{mcp_id}/install")
+async def install_mcp(mcp_id: str, request: Request) -> dict:
+    user_id = _user_id(request)
+    try:
+        with session_factory()() as db, db.begin():
+            mcp_store.install(db, user_id, mcp_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="MCP not found") from exc
+    except OverflowError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"id": mcp_id, "installed": True}
+
+
+@app.delete("/v1/mcp/{mcp_id}")
+async def uninstall_mcp(mcp_id: str, request: Request) -> dict:
+    user_id = _user_id(request)
+    try:
+        with session_factory()() as db, db.begin():
+            removed = mcp_store.uninstall(db, user_id, mcp_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="MCP not found") from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="MCP not installed")
+    return {"id": mcp_id, "installed": False}
 
 
 @app.post("/v1/conversations", status_code=status.HTTP_201_CREATED)
@@ -810,6 +877,7 @@ async def get_task_result(task_id: str, request: Request):
         "requested_skills": task.get("requested_skills", []),
         "loaded_skills": _loaded_skills(result_dir, task.get("skills", [])),
         "read_skills": _read_skills(result_dir, task.get("skills", [])),
+        "mcps": task.get("mcps", []),
         "timings_ms": {
             "total": total_ms,
             "cache_prepare": (

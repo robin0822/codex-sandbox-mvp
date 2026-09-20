@@ -50,6 +50,21 @@ API Manager 首次启动时把仓库 [skill-catalog/public](skill-catalog/public
 
 修改公共目录里的 Skill 不需要重新构建镜像，但已安装的用户副本不会自动更新；需要用户卸载后重新安装。若要更新仓库附带的首批公共 Skill，需要更新仓库并重新构建 API Manager 镜像，再由管理员决定如何更新服务器上的公共目录。
 
+## MCP 广场与 Codex 原生加载
+
+MCP 广场首批包含六个经过 `initialize`、`tools/list` 和代表性 `tools/call` 检查的远程 Streamable HTTP 服务：Context7、arXiv、Wikipedia、Weather、Qt Docs 和 Vonage Docs。公共目录由 `api-manager/app/mcp_store.py` 中的审核清单维护；用户安装状态保存于数据库表 `user_mcp_installations`，不创建用户 MCP 文件目录。
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /v1/mcp/catalog` | 获取公共 MCP，并附当前用户安装状态 |
+| `GET /v1/mcp` | 获取当前用户已安装的 MCP |
+| `POST /v1/mcp/{mcp-id}/install` | 安装一个已审核 MCP |
+| `DELETE /v1/mcp/{mcp-id}` | 卸载当前用户的 MCP |
+
+创建任务时，Manager 查询该用户当时已安装的 MCP，把原始 Runner 配置复制为任务配置，并追加原生 `[mcp_servers."..."]` 表。该文件只读挂载到 Runner 的 `/home/codex/.codex/config.toml`，任务结束后删除。Codex 启动后自行执行 MCP `initialize`、`tools/list` 和 `tools/call`，并通过 Responses API 的结构化工具字段把工具提供给模型；Manager 不向用户 Prompt 追加 MCP 名称、说明或调用规则。
+
+安装状态只影响之后创建的任务。运行时原生 `mcp_tool_call` 的开始、完成和失败状态会随 Codex JSONL 进入现有 SSE，前端在执行进度中直接展示。公共 Registry 里的条目不会自动发布到广场；新增条目应先核对来源、认证方式、工具权限、连接状态和实际调用结果。
+
 ## 多窗口对话与五轮上下文
 
 对话元数据持久化在 PostgreSQL。一个用户可拥有多个对话窗口，历史问答完整保留并分页读取；每次执行只从**当前窗口最近五轮成功问答**选取上下文。失败任务显示在历史中，但不计入模型上下文。超出 `MAX_HISTORY_BYTES` 的上下文会从最旧的一整轮开始舍弃；响应里的 `context_rounds_used` 表示实际使用轮数。该字节预算是应用侧保护值，不代表模型真实 Token 上限。
@@ -79,7 +94,7 @@ API Manager 首次启动时把仓库 [skill-catalog/public](skill-catalog/public
 python3 web/server.py
 ```
 
-打开 <http://127.0.0.1:5173>。左侧从服务端加载用户的对话窗口；打开窗口后分页读取完整历史，中间显示多轮提问与回答，运行时把可读推理摘要与命令、工具、Skill 加载等执行事件分区展示，右侧可查看每轮代码变更。模型未返回摘要时页面明确显示“未提供”，不会编造内部推理。回答和推理摘要使用随页面一起提供的 Markdown 渲染器，并清理不安全的 HTML；不依赖外部 CDN。刷新会恢复当前窗口及其历史。新对话在第一次提问时创建；仓库设置在该窗口内固定。技能广场支持查看、安装、卸载和插入显式 Skill 调用；MCP 与知识库仍是预留入口。页面提交时只发送当前问题，最近五轮上下文由 API Manager 从数据库读取。
+打开 <http://127.0.0.1:5173>。左侧从服务端加载用户的对话窗口；打开窗口后分页读取完整历史，中间显示多轮提问与回答，运行时把可读推理摘要与命令、工具、Skill 加载和 MCP 调用等执行事件分区展示，右侧可查看每轮代码变更。模型未返回摘要时页面明确显示“未提供”，不会编造内部推理。回答和推理摘要使用随页面一起提供的 Markdown 渲染器，并清理不安全的 HTML；不依赖外部 CDN。刷新会恢复当前窗口及其历史。新对话在第一次提问时创建；仓库设置在该窗口内固定。技能广场和 MCP 广场均支持按用户安装与卸载；知识库仍是预留入口。页面提交时只发送当前问题，最近五轮上下文由 API Manager 从数据库读取。
 
 如果 API Manager 在远程服务器上且只监听其回环地址，正常情况下先在另一个本机终端建立 SSH 转发：
 
@@ -96,7 +111,7 @@ python3 -m pip install -r web/requirements.txt
 CODEX_SSH_HOST=172.29.231.119 CODEX_SSH_USER=root python3 web/server.py
 ```
 
-启动时输入 SSH 密码。`CODEX_REMOTE_API_PORT` 默认 `18080`，可用于测试其他端口。每次提问仍会创建新的任务；页面刷新后从数据库恢复完整历史。MCP 和知识库尚未接入。
+启动时输入 SSH 密码。`CODEX_REMOTE_API_PORT` 默认 `18080`，可用于测试其他端口。每次提问仍会创建新的任务；页面刷新后从数据库恢复完整历史。知识库尚未接入。
 
 仓库首次使用时由 Manager 从远程创建裸仓库缓存，保存在 `/data/codex-mvp/repo-cache`。之后相同 URL 的任务不访问远程仓库：Runner 只读挂载缓存，在自己的容器内创建独立副本并检出记录的 commit。分支后续更新不会自动进入缓存；需要最新代码时，在请求的 `repository` 中传入 `"refresh": true`，本次任务会先增量更新缓存。每次任务仍使用全新的 Runner 和工作目录。首次远程克隆最多等待 120 秒。
 

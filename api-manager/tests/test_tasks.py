@@ -10,6 +10,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import main
+from app.conversation_store import session_factory
 
 
 class FakeContainer:
@@ -57,11 +58,16 @@ class TaskLifecycleTest(unittest.TestCase):
             patch.object(main, "MAX_ACTIVE_TASKS", 1),
             patch.object(main.docker, "from_env", return_value=self.docker),
             patch.object(main.os, "chown"),
-            patch.dict(main.os.environ, {"MODEL_API_KEY": "test-key"}),
+            patch.dict(main.os.environ, {
+                "MODEL_API_KEY": "test-key",
+                "DATABASE_URL": f"sqlite:///{self.root / 'conversations.sqlite3'}",
+            }),
         ]
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
+        session_factory.cache_clear()
+        self.addCleanup(session_factory.cache_clear)
         self.client = TestClient(main.app)
 
     def test_task_starts_runner_and_removes_it(self):
@@ -88,6 +94,10 @@ class TaskLifecycleTest(unittest.TestCase):
         self.assertEqual(
             self.docker.options["volumes"][str(self.root / "tasks" / task_id / "skills")],
             {"bind": "/home/codex/.agents/skills", "mode": "ro"},
+        )
+        self.assertEqual(
+            self.docker.options["volumes"][str(self.root / "tasks" / task_id / "codex-config.toml")],
+            {"bind": "/home/codex/.codex/config.toml", "mode": "ro"},
         )
         self.assertEqual(
             self.docker.options["volumes"][str(self.root / "repo-cache" / "mirror.git")]["mode"],

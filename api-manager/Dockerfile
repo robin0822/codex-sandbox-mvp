@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY api-manager/app/ /app/app/
 COPY skill-catalog/public/ /app/bundled-skills/
+COPY runner/config.toml /app/runner-config.toml
 
 RUN mkdir -p /data/tasks /data/results /data/logs
 

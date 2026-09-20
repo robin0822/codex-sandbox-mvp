@@ -55,6 +55,21 @@ class Turn(Base):
     )
 
 
+class UserMcpInstallation(Base):
+    __tablename__ = "user_mcp_installations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    mcp_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "mcp_id", name="uq_user_mcp_installation"),
+        Index("ix_user_mcp_installations_user", "user_id"),
+    )
+
+
 @lru_cache(maxsize=1)
 def session_factory():
     url = os.environ.get("DATABASE_URL", "sqlite:////data/conversations.sqlite3")
