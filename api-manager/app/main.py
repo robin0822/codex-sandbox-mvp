@@ -37,7 +37,9 @@ SKILL_BUNDLE_DIR = Path(os.environ.get("SKILL_BUNDLE_DIR", "/app/bundled-skills"
 RUNNER_CONFIG_TEMPLATE = Path(os.environ.get("RUNNER_CONFIG_TEMPLATE", "/app/runner-config.toml"))
 MAX_ACTIVE_TASKS = int(os.environ.get("MAX_ACTIVE_TASKS", "1"))
 RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "")
-TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "180"))
+# Codex turns are allowed to run until they finish. A positive value enables an
+# optional deployment-level safety deadline; zero follows native Codex behavior.
+TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "0"))
 CACHE_CLONE_TIMEOUT_SECONDS = int(os.environ.get("CACHE_CLONE_TIMEOUT_SECONDS", "120"))
 SSE_POLL_SECONDS = 0.25
 SSE_HEARTBEAT_SECONDS = 15
@@ -47,6 +49,8 @@ MAX_HISTORY_BYTES = int(os.environ.get("MAX_HISTORY_BYTES", "24000"))
 _lock = threading.Lock()
 _cache_lock = threading.Lock()
 _skill_lock = threading.Lock()
+FINAL_TASK_STATUSES = {"succeeded", "failed", "timed_out", "cancelled"}
+ACTIVE_TASK_STATUSES = {"starting", "running", "cancelling"}
 
 
 class Repository(BaseModel):
@@ -318,7 +322,7 @@ def _write_task(task: dict) -> None:
 
 def _active_count() -> int:
     return sum(
-        json.loads(path.read_text(encoding="utf-8"))["status"] in {"starting", "running"}
+        json.loads(path.read_text(encoding="utf-8"))["status"] in ACTIVE_TASK_STATUSES
         for path in TASK_DIR.glob("*/task.json")
     )
 
@@ -385,16 +389,17 @@ def _task_links(task_id: str) -> dict:
         "self": f"/v1/tasks/{task_id}",
         "events": f"/v1/tasks/{task_id}/events",
         "result": f"/v1/tasks/{task_id}/result",
+        "cancel": f"/v1/tasks/{task_id}/cancel",
     }
 
 
 def _sync_turn_from_task(task: dict) -> None:
     """Idempotent finalization, also called by reads after a manager restart."""
-    if not task.get("turn_id") or task["status"] not in {"succeeded", "failed", "timed_out"}:
+    if not task.get("turn_id") or task["status"] not in FINAL_TASK_STATUSES:
         return
     with session_factory()() as db, db.begin():
         turn = db.get(Turn, task["turn_id"])
-        if turn is None or turn.status in {"succeeded", "failed", "timed_out"}:
+        if turn is None or turn.status in FINAL_TASK_STATUSES:
             return
         turn.status = task["status"]
         turn.assistant_message = _optional_text(RESULT_DIR / task["task_id"] / "final-message.md")
@@ -408,14 +413,14 @@ def _sync_conversation_turns(conversation_id: str) -> None:
     with session_factory()() as db:
         pending = db.scalars(select(Turn.task_id).where(
             Turn.conversation_id == conversation_id,
-            Turn.status.in_(["starting", "running"]),
+            Turn.status.in_(ACTIVE_TASK_STATUSES),
         )).all()
     for task_id in pending:
         try:
             task = _read_task(task_id)
         except HTTPException:
             continue
-        if task["status"] in {"succeeded", "failed", "timed_out"}:
+        if task["status"] in FINAL_TASK_STATUSES:
             _sync_turn_from_task(task)
 
 
@@ -511,7 +516,7 @@ async def _stream_task_events(task_id: str, after_sequence: int):
                     yield _sse_event(task_id, sequence, "codex.event", event)
 
         task = _read_task(task_id)
-        if task["status"] in {"succeeded", "failed", "timed_out"}:
+        if task["status"] in FINAL_TASK_STATUSES:
             if pending.strip():
                 sequence += 1
                 if sequence > after_sequence:
@@ -522,7 +527,11 @@ async def _stream_task_events(task_id: str, after_sequence: int):
                     yield _sse_event(task_id, sequence, "codex.event", event)
             sequence += 1
             if sequence > after_sequence:
-                event_type = "task.completed" if task["status"] == "succeeded" else "task.failed"
+                event_type = (
+                    "task.completed" if task["status"] == "succeeded"
+                    else "task.cancelled" if task["status"] == "cancelled"
+                    else "task.failed"
+                )
                 yield _sse_event(task_id, sequence, event_type, {"status": task["status"]})
             return
 
@@ -536,6 +545,9 @@ def _run_task(task_id: str) -> None:
     container = None
     task = _read_task(task_id)
     try:
+        if task.get("cancel_requested_at"):
+            task["status"] = "cancelled"
+            return
         execution_mode = task.get("execution_mode", "repository_snapshot")
         host_mirror = None
         if execution_mode == "repository_snapshot":
@@ -550,6 +562,11 @@ def _run_task(task_id: str) -> None:
             task["cache_refreshed"] = None
             task["cache_prepare_seconds"] = 0
             task["source_commit"] = None
+        latest = _read_task(task_id)
+        if latest.get("cancel_requested_at"):
+            task = latest
+            task["status"] = "cancelled"
+            return
         _write_task(task)
         client = docker.from_env()
         volumes = {
@@ -581,11 +598,29 @@ def _run_task(task_id: str) -> None:
             pids_limit=256,
             security_opt=["no-new-privileges:true"],
         )
+        latest = _read_task(task_id)
+        if latest.get("cancel_requested_at"):
+            task = latest
+            try:
+                container.stop(timeout=10)
+            except DockerException:
+                container.kill()
+            task["status"] = "cancelled"
+            return
         task["status"] = "running"
         task["started_at"] = _now()
         _write_task(task)
-        deadline = time.monotonic() + TASK_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
+        deadline = time.monotonic() + TASK_TIMEOUT_SECONDS if TASK_TIMEOUT_SECONDS > 0 else None
+        while deadline is None or time.monotonic() < deadline:
+            latest = _read_task(task_id)
+            if latest.get("cancel_requested_at"):
+                task = latest
+                try:
+                    container.stop(timeout=10)
+                except DockerException:
+                    container.kill()
+                task["status"] = "cancelled"
+                break
             container.reload()
             if container.status == "exited":
                 break
@@ -596,12 +631,22 @@ def _run_task(task_id: str) -> None:
             except DockerException:
                 container.kill()
             task["status"] = "timed_out"
-        if task["status"] != "timed_out":
-            exit_file = RESULT_DIR / task_id / "exit-code.txt"
-            task["status"] = "succeeded" if exit_file.is_file() and exit_file.read_text().strip() == "0" else "failed"
+        if task["status"] not in {"timed_out", "cancelled"}:
+            latest = _read_task(task_id)
+            if latest.get("cancel_requested_at"):
+                task = latest
+                task["status"] = "cancelled"
+            else:
+                exit_file = RESULT_DIR / task_id / "exit-code.txt"
+                task["status"] = "succeeded" if exit_file.is_file() and exit_file.read_text().strip() == "0" else "failed"
     except subprocess.TimeoutExpired:
-        task["status"] = "timed_out"
-        task["error"] = "RepositoryCacheTimeout"
+        latest = _read_task(task_id)
+        if latest.get("cancel_requested_at"):
+            task = latest
+            task["status"] = "cancelled"
+        else:
+            task["status"] = "timed_out"
+            task["error"] = "RepositoryCacheTimeout"
     except (DockerException, OSError, KeyError, subprocess.CalledProcessError) as exc:
         task["status"] = "failed"
         task["error"] = type(exc).__name__
@@ -972,7 +1017,7 @@ async def create_turn(conversation_id: str, body: TurnRequest, request: Request,
                         }
                 active = db.scalar(select(Turn.id).where(
                     Turn.conversation_id == conversation_id,
-                    Turn.status.in_(["starting", "running"]),
+                    Turn.status.in_(ACTIVE_TASK_STATUSES),
                 ).limit(1))
                 if active:
                     raise HTTPException(status_code=409, detail="This conversation already has a running turn")
@@ -1034,6 +1079,27 @@ async def get_task(task_id: str, request: Request) -> dict:
     return _owned_task(task_id, _user_id(request))
 
 
+@app.post("/v1/tasks/{task_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
+async def cancel_task(task_id: str, request: Request) -> dict:
+    user_id = _user_id(request)
+    with _lock:
+        task = _owned_task(task_id, user_id)
+        if task["status"] in FINAL_TASK_STATUSES:
+            return {"task_id": task_id, "status": task["status"]}
+        task["cancel_requested_at"] = task.get("cancel_requested_at") or _now()
+        task["status"] = "cancelling"
+        _write_task(task)
+    try:
+        container = docker.from_env().containers.get(f"codex-task-{task_id}")
+        container.stop(timeout=10)
+    except DockerException:
+        # The worker may still be preparing the repository or may have already
+        # observed the request. It checks cancel_requested_at before launch and
+        # on every wait iteration.
+        pass
+    return {"task_id": task_id, "status": "cancelling"}
+
+
 @app.get("/v1/tasks/{task_id}/events")
 async def get_task_events(task_id: str, request: Request) -> StreamingResponse:
     _owned_task(task_id, _user_id(request))
@@ -1050,7 +1116,7 @@ async def get_task_events(task_id: str, request: Request) -> StreamingResponse:
 @app.get("/v1/tasks/{task_id}/result")
 async def get_task_result(task_id: str, request: Request):
     task = _owned_task(task_id, _user_id(request))
-    if task["status"] in {"starting", "running"}:
+    if task["status"] in ACTIVE_TASK_STATUSES:
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={"task_id": task_id, "status": task["status"]},

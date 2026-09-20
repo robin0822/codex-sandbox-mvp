@@ -32,7 +32,8 @@ services:
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       DATA_DIR: /data
       HOST_DATA_DIR: /data/codex-mvp
-      TASK_TIMEOUT_SECONDS: "180"
+      # Zero lets Codex run until completion, failure, or explicit cancellation.
+      TASK_TIMEOUT_SECONDS: "0"
       CACHE_CLONE_TIMEOUT_SECONDS: "120"
       DATABASE_URL: postgresql+psycopg://codex:${POSTGRES_PASSWORD}@codex-postgres:5432/codex
       ALLOW_LOCAL_DEV_USER: ${ALLOW_LOCAL_DEV_USER:-1}

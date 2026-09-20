@@ -258,6 +258,8 @@ button { cursor: pointer; }
 .send-button { width: 31px; height: 31px; display: grid; place-items: center; border: 0; border-radius: 9px; background: #426bd7; color: #fff; font-size: 15px; transform: rotate(-45deg); }
 .send-button:hover { background: #315bcb; }
 .send-button:disabled { background: #b7c5e2; cursor: not-allowed; }
+.send-button.is-stop { transform: none; background: #dc5b63; font-size: 11px; }
+.send-button.is-stop:hover { background: #c94750; }
 .composer-caption { margin: 10px 0 0; color: #abb5c2; text-align: center; font-size: 10px; }
 
 .detail-panel { flex: 0 0 374px; display: flex; flex-direction: column; border-left: 1px solid #e7ebf1; background: #fbfcfe; }

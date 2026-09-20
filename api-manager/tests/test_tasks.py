@@ -14,13 +14,26 @@ from app.conversation_store import session_factory
 
 
 class FakeContainer:
-    status = "exited"
-
-    def __init__(self):
+    def __init__(self, status="exited", exit_after_reloads=None):
+        self.status = status
+        self.exit_after_reloads = exit_after_reloads
+        self.reloads = 0
         self.removed = False
+        self.stopped = False
+        self.killed = False
 
     def reload(self):
-        pass
+        self.reloads += 1
+        if self.exit_after_reloads is not None and self.reloads >= self.exit_after_reloads:
+            self.status = "exited"
+
+    def stop(self, timeout=10):
+        self.stopped = True
+        self.status = "exited"
+
+    def kill(self):
+        self.killed = True
+        self.status = "exited"
 
     def logs(self, **kwargs):
         return b"runner test log"
@@ -38,6 +51,9 @@ class FakeDocker:
     def run(self, image, **options):
         self.options = options
         self.image = image
+        return self.container
+
+    def get(self, name):
         return self.container
 
 
@@ -125,6 +141,54 @@ class TaskLifecycleTest(unittest.TestCase):
             item["bind"] for item in self.docker.options["volumes"].values()
         })
         self.assertTrue(workspace.is_dir())
+
+    def test_zero_task_timeout_waits_for_runner_to_finish(self):
+        self.container.status = "running"
+        self.container.exit_after_reloads = 3
+        conversation_id = "8" * 32
+        main._create_workspace("local-dev", conversation_id)
+        task = main._create_task_files(
+            None, "Take as long as needed", "local-dev", [], [], conversation_id, None,
+            "conversation_workspace", 1,
+        )
+        (self.root / "results" / task["task_id"] / "exit-code.txt").write_text("0")
+        with patch.object(main, "TASK_TIMEOUT_SECONDS", 0), patch.object(main.time, "sleep"):
+            main._run_task(task["task_id"])
+        finished = main._read_task(task["task_id"])
+        self.assertEqual(finished["status"], "succeeded")
+        self.assertEqual(self.container.reloads, 3)
+        self.assertFalse(self.container.stopped)
+        self.assertFalse(self.container.killed)
+
+    def test_cancel_endpoint_requests_runner_stop(self):
+        task_id = "9" * 32
+        task_dir = self.root / "tasks" / task_id
+        task_dir.mkdir(parents=True)
+        (task_dir / "task.json").write_text(json.dumps({
+            "task_id": task_id, "status": "running", "user_id": "local-dev",
+        }))
+        self.container.status = "running"
+        response = self.client.post(f"/v1/tasks/{task_id}/cancel")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "cancelling")
+        cancelling = main._read_task(task_id)
+        self.assertEqual(cancelling["status"], "cancelling")
+        self.assertIn("cancel_requested_at", cancelling)
+        self.assertTrue(self.container.stopped)
+
+    def test_worker_finishes_cancelled_task_without_starting_container(self):
+        conversation_id = "7" * 32
+        main._create_workspace("local-dev", conversation_id)
+        task = main._create_task_files(
+            None, "Stop this", "local-dev", [], [], conversation_id, None,
+            "conversation_workspace", 1,
+        )
+        task["status"] = "cancelling"
+        task["cancel_requested_at"] = main._now()
+        main._write_task(task)
+        main._run_task(task["task_id"])
+        self.assertEqual(main._read_task(task["task_id"])["status"], "cancelled")
+        self.assertIsNone(self.docker.options)
 
     def test_repository_cache_cold_warm_and_explicit_refresh(self):
         source = self.root / "source"
@@ -217,6 +281,18 @@ class TaskLifecycleTest(unittest.TestCase):
             f"/v1/tasks/{task_id}/events", headers={"Last-Event-ID": "abc"}
         )
         self.assertEqual(invalid.status_code, 400)
+
+    def test_sse_reports_cancelled_terminal_status(self):
+        task_id = "6" * 32
+        task_dir = self.root / "tasks" / task_id
+        task_dir.mkdir(parents=True)
+        (task_dir / "task.json").write_text(json.dumps({
+            "task_id": task_id, "status": "cancelled", "user_id": "local-dev",
+        }))
+        response = self.client.get(f"/v1/tasks/{task_id}/events")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: task.cancelled", response.text)
+        self.assertIn('\"status\":\"cancelled\"', response.text)
 
     def test_sse_follows_new_lines_without_emitting_partial_json(self):
         task_id = "c" * 32

@@ -31,7 +31,7 @@ curl http://127.0.0.1:18080/health/live
 curl http://127.0.0.1:18080/health/ready
 ```
 
-API Manager 支持 `POST /v1/tasks` 创建一次性 Runner；`GET /v1/tasks/{task_id}` 查询状态；`GET /v1/tasks/{task_id}/events` 实时推送 Codex 事件；`GET /v1/tasks/{task_id}/result` 返回最终回答、退出码和 diff；`GET /v1/capacity` 查看单机并发。Runner 完成或超时后由 Manager 删除，结果文件暂存于 `/data/codex-mvp/results/{task_id}`。
+API Manager 支持 `POST /v1/tasks` 创建一次性 Runner；`GET /v1/tasks/{task_id}` 查询状态；`GET /v1/tasks/{task_id}/events` 实时推送 Codex 事件；`GET /v1/tasks/{task_id}/result` 返回最终回答、退出码和 diff；`POST /v1/tasks/{task_id}/cancel` 主动停止任务；`GET /v1/capacity` 查看单机并发。默认 `TASK_TIMEOUT_SECONDS=0`，Runner 会像原生 `codex exec` 一样运行到完成、失败或用户取消；设置为正整数时才启用部署层总任务超时。Runner 结束后由 Manager 删除，结果文件暂存于 `/data/codex-mvp/results/{task_id}`。
 
 ## Skill 广场与用户目录
 
@@ -136,7 +136,15 @@ curl -N -H 'Accept: text/event-stream' \
   http://127.0.0.1:18080/v1/tasks/<task_id>/events
 ```
 
-事件包含递增的 `id`、`event` 和 JSON `data`；断线后把最后收到的数字 `id` 放入 `Last-Event-ID` 请求头即可续读。空闲时每 15 秒发送 heartbeat，任务结束时发送 `task.completed` 或 `task.failed` 并关闭流。Manager 端口仅绑定服务器回环地址。本阶段任务状态由本机文件保存，Manager 在运行中重启时尚无任务恢复机制。
+事件包含递增的 `id`、`event` 和 JSON `data`；断线后把最后收到的数字 `id` 放入 `Last-Event-ID` 请求头即可续读。空闲时每 15 秒发送 heartbeat，任务结束时发送 `task.completed`、`task.failed` 或 `task.cancelled` 并关闭流。Manager 端口仅绑定服务器回环地址。本阶段任务状态由本机文件保存，Manager 在运行中重启时尚无任务恢复机制。
+
+任务默认没有总执行时限。需要停止时可以点击前端运行按钮位置显示的停止按钮，或者调用：
+
+```bash
+curl -X POST http://127.0.0.1:18080/v1/tasks/<task_id>/cancel
+```
+
+Manager 会记录取消请求、停止对应 Runner，并在清理结果后把任务标记为 `cancelled`。模型流空闲、单条命令、MCP 调用和首次仓库缓存仍使用各自的局部超时。
 
 任务结束后读取 `links.result`：
 

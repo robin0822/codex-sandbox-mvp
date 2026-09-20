@@ -122,6 +122,13 @@ class LocalPreviewTest(unittest.TestCase):
         self.assertIn("event: codex.event", events)
         self.assertIn("event: task.completed", events)
 
+    def test_cancel_task_is_proxied_to_api_manager(self):
+        task_id = "a" * 32
+        request = Request(self.base + f"/v1/tasks/{task_id}/cancel", data=b"", method="POST")
+        with urlopen(request) as response:
+            self.assertEqual(response.status, 202)
+            self.assertEqual(json.load(response)["task_id"], "abc")
+
     def test_ssh_bridge_streams_text_lines_as_sse_bytes(self):
         response = io.StringIO('event: codex.event\ndata: {"data":{"type":"turn.started"}}\n\n')
         stderr = Mock()

@@ -615,7 +615,7 @@ function renderEvent(item, parent) {
 }
 
 function followLiveOutput(turn) {
-  const running = turn.status === "starting" || turn.status === "running";
+  const running = ["starting", "running", "cancelling"].includes(turn.status);
   if (!running || state.liveTurnId !== turn.id) return;
   requestAnimationFrame(() => {
     const scroll = $("chat-scroll");
@@ -645,7 +645,7 @@ function addEvent(turn, event, envelope = null) {
 }
 
 function renderProgress(turn) {
-  const running = turn.status === "starting" || turn.status === "running";
+  const running = ["starting", "running", "cancelling"].includes(turn.status);
   const expanded = turn.progressOpen ?? running;
   const card = node("div", "progress-card" + (running ? " is-running" : ""));
   const heading = node("button", "progress-heading");
@@ -697,18 +697,21 @@ function renderTurn(turn) {
   const name = node("div", "assistant-name", "Codex");
   const status = turn.status === "succeeded" ? "已完成"
     : turn.status === "timed_out" ? "执行超时"
+    : turn.status === "cancelled" ? "已停止"
+    : turn.status === "cancelling" ? "正在停止"
     : turn.status === "failed" ? "执行失败" : "正在工作";
-  name.append(node("span", "assistant-state " + (turn.status === "succeeded" ? "success" : ["failed", "timed_out"].includes(turn.status) ? "error" : ""), status));
+  name.append(node("span", "assistant-state " + (turn.status === "succeeded" ? "success" : ["failed", "timed_out", "cancelled"].includes(turn.status) ? "error" : ""), status));
   body.append(name);
   const loaded = turn.result?.loaded_skills?.length ? turn.result.loaded_skills
     : (turn.events || []).filter((event) => event.kind === "skill").map((event) => event.skillId);
   if (loaded.length) body.append(node("div", "skill-usage", "已验证加载 " + loaded.map((id) => "$" + id).join("、")));
-  if (turn.status === "starting" || turn.status === "running") {
+  if (["starting", "running", "cancelling"].includes(turn.status)) {
     body.append(renderProgress(turn));
   } else {
     if (turn.events?.length) body.append(renderProgress(turn));
     const answer = turn.assistant_message || (turn.status === "succeeded" ? "任务没有返回最终回答。"
       : turn.status === "timed_out" ? "任务执行超时，已自动停止。点击执行详情查看过程。"
+      : turn.status === "cancelled" ? "任务已由用户停止。点击执行详情查看已产生的过程。"
       : "任务执行失败，点击执行详情查看结果。");
     body.append(markdownNode(answer, "answer"));
     const actions = node("div", "answer-actions");
@@ -750,9 +753,29 @@ function renderTurns(scrollBottom = true) {
 }
 
 function updateComposer() {
-  const active = state.turns.some((turn) => turn.status === "starting" || turn.status === "running");
-  $("send-button").disabled = state.submitting || active;
+  const active = state.turns.find((turn) => ["starting", "running", "cancelling"].includes(turn.status));
+  const button = $("send-button");
+  button.disabled = state.submitting || active?.status === "cancelling";
+  button.classList.toggle("is-stop", Boolean(active));
+  button.textContent = active ? "■" : "➤";
+  button.title = active ? "停止执行" : "发送（Enter）";
+  button.setAttribute("aria-label", active ? "停止执行" : "发送问题");
   $("prompt-input").disabled = state.submitting || active;
+}
+
+async function cancelActiveTask() {
+  const turn = state.turns.find((item) => ["starting", "running"].includes(item.status));
+  if (!turn || state.submitting) return;
+  turn.status = "cancelling";
+  addEvent(turn, { type: "system", title: "正在停止任务", message: "正在请求 Runner 停止当前 Codex 轮次。" });
+  renderTurns(false);
+  try {
+    await api("/v1/tasks/" + turn.task_id + "/cancel", { method: "POST" });
+  } catch (error) {
+    turn.status = "running";
+    toast("停止失败：" + error.message);
+    renderTurns(false);
+  }
 }
 
 async function openConversation(id) {
@@ -863,7 +886,7 @@ function connectEvents(turn) {
       addEvent(turn, { type: "system", title: "事件解析失败", message: "收到无法解析的事件。" });
     }
   });
-  for (const type of ["task.completed", "task.failed"]) {
+  for (const type of ["task.completed", "task.failed", "task.cancelled"]) {
     source.addEventListener(type, () => {
       if (state.liveTurnId !== turn.id) return;
       addEvent(turn, { type: "system", title: "执行结束", message: "正在读取最终结果。" });
@@ -873,7 +896,7 @@ function connectEvents(turn) {
   source.addEventListener("error", () => {
     if (state.liveTurnId !== turn.id) return;
     api("/v1/tasks/" + turn.task_id).then((task) => {
-      if (["succeeded", "failed", "timed_out"].includes(task.status)) finishLive(turn);
+      if (["succeeded", "failed", "timed_out", "cancelled"].includes(task.status)) finishLive(turn);
     }).catch(() => {});
   });
 }
@@ -938,7 +961,7 @@ async function openDetails(turn) {
     state.selectedTurn = turn;
     state.selectedResult = result;
     const facts = [
-      ["状态", result.status === "succeeded" ? "已完成" : result.status === "timed_out" ? "执行超时" : result.status || "失败"],
+      ["状态", result.status === "succeeded" ? "已完成" : result.status === "timed_out" ? "执行超时" : result.status === "cancelled" ? "已停止" : result.status || "失败"],
       ["任务 ID", turn.task_id],
       ["工作区", state.activeConversation.workspace?.type === "conversation_workspace" ? "窗口持久工作区" : "旧仓库快照"],
       ["本轮可用技能", result.skills?.length ? result.skills.join("、") : "无"],
@@ -994,6 +1017,7 @@ function loadEvents(turn) {
   };
   source.addEventListener("task.completed", stop);
   source.addEventListener("task.failed", stop);
+  source.addEventListener("task.cancelled", stop);
   source.addEventListener("error", stop);
 }
 
@@ -1022,7 +1046,11 @@ async function initialize() {
   }
 }
 
-$("send-button").addEventListener("click", sendPrompt);
+$("send-button").addEventListener("click", () => {
+  const active = state.turns.some((turn) => ["starting", "running", "cancelling"].includes(turn.status));
+  if (active) cancelActiveTask();
+  else sendPrompt();
+});
 $("prompt-input").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();

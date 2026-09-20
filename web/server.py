@@ -153,6 +153,8 @@ class Handler(SimpleHTTPRequestHandler):
             self._logout()
         elif path in ("/v1/tasks", "/v1/conversations") or re.fullmatch(
             r"/v1/conversations/[0-9a-f]{32}/turns", path
+        ) or re.fullmatch(
+            r"/v1/tasks/[0-9a-f]{32}/cancel", path
         ) or re.fullmatch(r"/v1/skills/[a-z][a-z0-9-]{0,63}/install", path) or re.fullmatch(
             r"/v1/mcp/[a-z][a-z0-9-]{0,63}/install", path
         ):
