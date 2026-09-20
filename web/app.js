@@ -1036,7 +1036,7 @@ $("capability-options").addEventListener("click", (event) => {
   const selected = selectedCapabilityIds();
   if (selected.has(id)) selected.delete(id); else selected.add(id);
   renderCapabilitySelection();
-  renderCapabilityOptions();
+  closeCapabilityPicker();
 });
 $("capability-chips").addEventListener("click", (event) => {
   const button = event.target.closest("[data-capability-id]");
