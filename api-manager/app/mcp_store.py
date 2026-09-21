@@ -221,8 +221,11 @@ def render_codex_config(base_config: str, servers: list[CatalogMcp]) -> str:
             f'[mcp_servers."{server.id}"]',
             f"url = {json.dumps(server.endpoint)}",
             "enabled = true",
-            "required = false",
-            "startup_timeout_sec = 10",
+            # A task only receives servers selected for this turn. If one of
+            # those servers cannot start, fail the task instead of letting the
+            # model incorrectly claim that no network capability was loaded.
+            "required = true",
+            "startup_timeout_sec = 30",
             "tool_timeout_sec = 25",
             f"enabled_tools = {json.dumps(list(server.tools), ensure_ascii=False)}",
             "",
