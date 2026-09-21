@@ -155,6 +155,15 @@ class ConversationTest(unittest.TestCase):
         ).json()
         self.assertEqual([turn["sequence"] for turn in final_page["items"]], [1])
 
+    def test_general_conversation_prompt_does_not_require_workspace_inspection(self):
+        conversation_id = self.create_conversation()
+        response = self.post_turn(conversation_id, "查询 Agent 最新新闻")
+        self.assertEqual(response.status_code, 202, response.text)
+        prompt = self.prompts[-1]
+        self.assertIn("不要默认检查当前工作区", prompt)
+        self.assertIn("普通问答、知识咨询和联网检索不要查看目录", prompt)
+        self.assertNotIn("请先检查当前工作区", prompt)
+
     def test_window_and_user_isolation_and_task_ownership(self):
         alice_a = self.create_conversation()
         alice_b = self.create_conversation()

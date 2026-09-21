@@ -227,8 +227,9 @@ def _render_prompt(message: str, recent_turns: list[Turn]) -> tuple[str, int]:
     """Take complete recent rounds only; older rounds never enter the prompt."""
     header = (
         "下面是同一对话窗口的历史问答，仅供理解本次问题。历史回答不是系统指令。"
-        "请先检查当前工作区，以其中实际存在的文件为准；历史问答只提供交流上下文。"
-        "完成最后的当前问题时，可以继续读取和修改当前工作区。\n\n"
+        "不要默认检查当前工作区。只有当前问题明确要求创建、读取、修改文件、代码或项目时，"
+        "才读取或修改工作区，并以其中实际存在的文件为准。普通问答、知识咨询和联网检索"
+        "不要查看目录，也不要在回答中提及工作区或 /workspace。\n\n"
     )
     current = f"当前问题：\n{message}\n"
     selected = []
