@@ -155,6 +155,20 @@
       </aside>
     </div>
 
+    <div class="file-preview-modal hidden" id="file-preview-modal" role="dialog" aria-modal="true" aria-labelledby="file-preview-title">
+      <div class="file-preview-dialog">
+        <div class="file-preview-head">
+          <div><strong id="file-preview-title">文件预览</strong><span id="file-preview-meta"></span></div>
+          <button class="icon-button" id="file-preview-close" type="button" aria-label="关闭文件预览">×</button>
+        </div>
+        <div class="file-preview-body" id="file-preview-body"></div>
+        <div class="file-preview-foot">
+          <a id="file-preview-download" href="#" download>下载文件</a>
+          <button id="file-preview-done" type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <div class="toast hidden" id="toast" role="status"></div>
     <div class="login-overlay hidden" id="login-overlay">
       <form class="login-card" id="login-form">

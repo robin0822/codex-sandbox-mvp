@@ -801,6 +801,114 @@ function renderProgress(turn) {
   return card;
 }
 
+function workspaceChanges(turn) {
+  return turn.result?.workspace_changes || turn.workspace_changes || { created: [], modified: [], deleted: [] };
+}
+
+function fileEndpoint(turn, path, download = false) {
+  const conversationId = turn.conversation_id || state.activeConversation?.id;
+  return `/v1/conversations/${conversationId}/files/content?path=${encodeURIComponent(path)}`
+    + (download ? "&download=true" : "");
+}
+
+function fileIcon(type) {
+  return type === "image" ? "▧" : type === "pdf" ? "PDF" : type === "json" ? "{}" : type === "markdown" ? "M↓" : "</>";
+}
+
+function renderFileCards(turn) {
+  const changes = workspaceChanges(turn);
+  const visible = [
+    ...(changes.created || []).map((item) => ({ ...item, changeLabel: "新建" })),
+    ...(changes.modified || []).map((item) => ({ ...item, changeLabel: "已修改" })),
+  ];
+  if (!visible.length && !(changes.deleted || []).length) return null;
+  const section = node("section", "turn-files");
+  const heading = node("div", "turn-files-heading");
+  const count = visible.length + (changes.deleted || []).length;
+  heading.append(node("strong", null, `本轮文件 ${count}`));
+  const downloadAll = node("a", null, "下载全部");
+  downloadAll.href = changes.download_all_url || `/v1/conversations/${turn.conversation_id}/workspace`;
+  downloadAll.download = "workspace.tar.gz";
+  heading.append(downloadAll);
+  section.append(heading);
+  const grid = node("div", "turn-file-grid");
+  for (const item of visible) {
+    const card = node("article", "turn-file-card");
+    const icon = node("span", "turn-file-icon " + (item.preview_type || "file"), fileIcon(item.preview_type));
+    const copy = node("div", "turn-file-copy");
+    copy.append(node("strong", null, item.name), node("span", null, `${item.changeLabel} · ${formatBytes(item.size_bytes)}`));
+    const actions = node("div", "turn-file-actions");
+    if (item.previewable) {
+      const preview = node("button", null, "预览");
+      preview.type = "button";
+      preview.dataset.action = "file-preview";
+      preview.dataset.turnId = turn.id;
+      preview.dataset.path = item.path;
+      preview.dataset.name = item.name;
+      preview.dataset.previewType = item.preview_type;
+      preview.dataset.size = item.size_bytes;
+      actions.append(preview);
+    }
+    const download = node("a", null, "下载");
+    download.href = item.download_url || fileEndpoint(turn, item.path, true);
+    download.download = item.name;
+    actions.append(download);
+    card.append(icon, copy, actions);
+    grid.append(card);
+  }
+  section.append(grid);
+  if ((changes.deleted || []).length) {
+    section.append(node("p", "turn-files-deleted", "已删除：" + changes.deleted.map((item) => item.path).join("、")));
+  }
+  return section;
+}
+
+function closeFilePreview() {
+  $("file-preview-modal").classList.add("hidden");
+  $("file-preview-body").replaceChildren();
+}
+
+async function openFilePreview(turn, button) {
+  const { path, name, previewType } = button.dataset;
+  const previewUrl = fileEndpoint(turn, path);
+  const downloadUrl = fileEndpoint(turn, path, true);
+  $("file-preview-title").textContent = name;
+  $("file-preview-meta").textContent = `${previewType.toUpperCase()} · ${formatBytes(Number(button.dataset.size))}`;
+  $("file-preview-download").href = downloadUrl;
+  $("file-preview-download").download = name;
+  const body = $("file-preview-body");
+  body.replaceChildren(node("div", "file-preview-loading", "正在加载预览…"));
+  $("file-preview-modal").classList.remove("hidden");
+  try {
+    if (previewType === "image") {
+      const image = node("img", "file-preview-image");
+      image.src = previewUrl;
+      image.alt = name;
+      body.replaceChildren(image);
+      return;
+    }
+    if (previewType === "pdf") {
+      const frame = node("iframe", "file-preview-pdf");
+      frame.src = previewUrl;
+      frame.title = name;
+      body.replaceChildren(frame);
+      return;
+    }
+    const response = await fetch(previewUrl, { cache: "no-store" });
+    if (!response.ok) throw new Error(await errorText(response));
+    let text = await response.text();
+    if (previewType === "markdown") body.replaceChildren(markdownNode(text, "file-preview-markdown"));
+    else {
+      if (previewType === "json") {
+        try { text = JSON.stringify(JSON.parse(text), null, 2); } catch {}
+      }
+      body.replaceChildren(node("pre", "file-preview-code", text));
+    }
+  } catch (error) {
+    body.replaceChildren(node("div", "file-preview-error", "预览失败：" + error.message));
+  }
+}
+
 function renderTurn(turn) {
   const article = node("article", "turn");
   article.dataset.turnId = turn.id;
@@ -830,6 +938,8 @@ function renderTurn(turn) {
       : turn.status === "cancelled" ? "任务已由用户停止。点击执行详情查看已产生的过程。"
       : "任务执行失败，点击执行详情查看结果。");
     body.append(markdownNode(answer, "answer"));
+    const files = renderFileCards(turn);
+    if (files) body.append(files);
     const actions = node("div", "answer-actions");
     const copy = node("button", null, "⧉ 复制回答");
     copy.type = "button";
@@ -1242,12 +1352,21 @@ $("turn-list").addEventListener("click", async (event) => {
   if (!button) return;
   const turn = state.turns.find((item) => item.id === button.dataset.turnId);
   if (!turn) return;
+  if (button.dataset.action === "file-preview") return openFilePreview(turn, button);
   if (button.dataset.action === "details") return openDetails(turn);
   if (button.dataset.action === "events") return loadEvents(turn);
   try {
     await navigator.clipboard.writeText(turn.assistant_message || "");
     toast("回答已复制。");
   } catch { toast("复制失败，请手动选择文字。"); }
+});
+$("file-preview-close").addEventListener("click", closeFilePreview);
+$("file-preview-done").addEventListener("click", closeFilePreview);
+$("file-preview-modal").addEventListener("click", (event) => {
+  if (event.target === $("file-preview-modal")) closeFilePreview();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("file-preview-modal").classList.contains("hidden")) closeFilePreview();
 });
 $("detail-button").addEventListener("click", () => {
   if (state.selectedTurn) openDetails(state.selectedTurn);

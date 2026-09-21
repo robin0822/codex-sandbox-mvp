@@ -88,6 +88,7 @@ class LocalPreviewTest(unittest.TestCase):
         with urlopen(self.base + "/") as response:
             page = response.read().decode()
             self.assertIn("Codex 工作台", page)
+            self.assertIn('id="file-preview-modal"', page)
             self.assertIn("/vendor/markdown-it/markdown-it.umd.min.js", page)
             self.assertIn("/vendor/dompurify/purify.min.js", page)
         with urlopen(self.base + "/vendor/markdown-it/markdown-it.umd.min.js") as response:

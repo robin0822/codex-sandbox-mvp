@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -13,7 +14,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import docker
 from docker.errors import DockerException
@@ -46,6 +47,13 @@ SSE_HEARTBEAT_SECONDS = 15
 DOWNLOADABLE_ARTIFACTS = {"changes.diff", "codex-events.jsonl"}
 MAX_HISTORY_ROUNDS = 5
 MAX_HISTORY_BYTES = int(os.environ.get("MAX_HISTORY_BYTES", "24000"))
+WORKSPACE_EXCLUDED_DIRS = {".git", "node_modules", "target", "__pycache__"}
+TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024
+CODE_EXTENSIONS = {
+    ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html", ".java",
+    ".js", ".jsx", ".kt", ".php", ".py", ".rb", ".rs", ".sh", ".sql", ".swift",
+    ".toml", ".ts", ".tsx", ".vue", ".xml", ".yaml", ".yml",
+}
 _lock = threading.Lock()
 _cache_lock = threading.Lock()
 _skill_lock = threading.Lock()
@@ -208,6 +216,110 @@ def _safe_workspace_entry(root: Path, relative: str) -> Path:
     return resolved
 
 
+def _preview_type(path: Path, mime_type: str) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".markdown"}:
+        return "markdown"
+    if suffix == ".json":
+        return "json"
+    if suffix in CODE_EXTENSIONS:
+        return "code"
+    if mime_type.startswith("text/"):
+        return "text"
+    if mime_type in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
+        return "image"
+    if mime_type == "application/pdf":
+        return "pdf"
+    return None
+
+
+def _workspace_file_metadata(relative: str, fingerprint: dict) -> dict:
+    path = Path(relative)
+    mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    preview_type = _preview_type(path, mime_type)
+    size = fingerprint.get("size_bytes", 0)
+    return {
+        "path": relative,
+        "name": path.name,
+        "size_bytes": size,
+        "mime_type": mime_type,
+        "preview_type": preview_type,
+        "previewable": bool(preview_type and (preview_type in {"image", "pdf"} or size <= TEXT_PREVIEW_LIMIT)),
+    }
+
+
+def _workspace_snapshot(root: Path) -> dict[str, dict]:
+    """Fingerprint persistent user files while excluding generated dependency trees."""
+    snapshot = {}
+    if not root.is_dir():
+        return snapshot
+    for path in root.rglob("*"):
+        try:
+            relative_path = path.relative_to(root)
+            if any(part in WORKSPACE_EXCLUDED_DIRS for part in relative_path.parts):
+                continue
+            if path.is_symlink() or not path.is_file():
+                continue
+            stat = path.stat()
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            snapshot[relative_path.as_posix()] = {
+                "size_bytes": stat.st_size,
+                "modified_ns": stat.st_mtime_ns,
+                "sha256": digest.hexdigest(),
+            }
+        except OSError:
+            continue
+    return snapshot
+
+
+def _workspace_changes(before: dict[str, dict], after: dict[str, dict]) -> dict:
+    created = sorted(set(after) - set(before))
+    deleted = sorted(set(before) - set(after))
+    modified = sorted(
+        path for path in set(before) & set(after)
+        if before[path].get("sha256") != after[path].get("sha256")
+    )
+    return {
+        "created": [_workspace_file_metadata(path, after[path]) for path in created],
+        "modified": [_workspace_file_metadata(path, after[path]) for path in modified],
+        "deleted": [_workspace_file_metadata(path, before[path]) for path in deleted],
+    }
+
+
+def _stored_workspace_changes(task_id: str) -> dict:
+    path = RESULT_DIR / task_id / "workspace-changes.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        value = {}
+    return {
+        key: value.get(key, []) if isinstance(value.get(key, []), list) else []
+        for key in ("created", "modified", "deleted")
+    }
+
+
+def _workspace_changes_response(task: dict) -> dict:
+    changes = _stored_workspace_changes(task["task_id"])
+    conversation_id = task.get("conversation_id")
+    if not conversation_id:
+        return {**changes, "download_all_url": None}
+    for change_type in ("created", "modified"):
+        for item in changes[change_type]:
+            base = (
+                f"/v1/conversations/{conversation_id}/files/content"
+                f"?path={quote(item['path'], safe='')}"
+            )
+            item["preview_url"] = base if item.get("previewable") else None
+            item["download_url"] = base + "&download=true"
+    return {
+        **changes,
+        "download_all_url": f"/v1/conversations/{conversation_id}/workspace",
+    }
+
+
 def _turn_data(turn: Turn) -> dict:
     return {
         "id": turn.id,
@@ -220,6 +332,7 @@ def _turn_data(turn: Turn) -> dict:
         "context_rounds_used": turn.context_rounds_used,
         "created_at": turn.created_at.isoformat(),
         "completed_at": turn.completed_at.isoformat() if turn.completed_at else None,
+        "workspace_changes": _stored_workspace_changes(turn.task_id),
     }
 
 
@@ -553,6 +666,7 @@ async def _stream_task_events(task_id: str, after_sequence: int):
 def _run_task(task_id: str) -> None:
     container = None
     task = _read_task(task_id)
+    workspace_before = {}
     try:
         if task.get("cancel_requested_at"):
             task["status"] = "cancelled"
@@ -571,6 +685,9 @@ def _run_task(task_id: str) -> None:
             task["cache_refreshed"] = None
             task["cache_prepare_seconds"] = 0
             task["source_commit"] = None
+            workspace_before = _workspace_snapshot(
+                _workspace_path(task["user_id"], task["conversation_id"])
+            )
         latest = _read_task(task_id)
         if latest.get("cancel_requested_at"):
             task = latest
@@ -671,6 +788,17 @@ def _run_task(task_id: str) -> None:
                 container.remove(force=True)
             except DockerException as exc:
                 task["cleanup_error"] = type(exc).__name__
+        if task.get("execution_mode") == "conversation_workspace" and task.get("conversation_id"):
+            try:
+                workspace_after = _workspace_snapshot(
+                    _workspace_path(task["user_id"], task["conversation_id"])
+                )
+                changes = _workspace_changes(workspace_before, workspace_after)
+                (RESULT_DIR / task_id / "workspace-changes.json").write_text(
+                    json.dumps(changes, ensure_ascii=False), encoding="utf-8"
+                )
+            except OSError as exc:
+                task["workspace_snapshot_error"] = type(exc).__name__
         task["finished_at"] = _now()
         _write_task(task)
         if "cleanup_error" not in task:
@@ -903,19 +1031,38 @@ async def list_workspace_files(conversation_id: str, request: Request,
         else:
             entry_type = "file"
             size = entry.stat().st_size
-        items.append({"path": relative, "name": entry.name, "type": entry_type, "size_bytes": size})
+        item = {"path": relative, "name": entry.name, "type": entry_type, "size_bytes": size}
+        if entry_type == "file":
+            item.update(_workspace_file_metadata(relative, {"size_bytes": size}))
+            item["type"] = "file"
+        items.append(item)
     return {"path": path, "items": items}
 
 
 @app.get("/v1/conversations/{conversation_id}/files/content")
 async def download_workspace_file(conversation_id: str, request: Request,
-                                  path: str = Query(..., min_length=1, max_length=1024)) -> FileResponse:
+                                  path: str = Query(..., min_length=1, max_length=1024),
+                                  download: bool = Query(False)) -> FileResponse:
     user_id = _user_id(request)
     _, workspace = _owned_workspace(conversation_id, user_id)
     file_path = _safe_workspace_entry(workspace, path)
-    if not file_path.is_file():
+    if file_path.is_symlink() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="workspace file not found")
-    return FileResponse(file_path, filename=file_path.name)
+    mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    preview_type = _preview_type(file_path, mime_type)
+    if not download and preview_type in {"markdown", "text", "code"}:
+        response_type = "text/plain; charset=utf-8"
+    elif not download and preview_type in {"json", "image", "pdf"}:
+        response_type = mime_type
+    else:
+        response_type = "application/octet-stream"
+    return FileResponse(
+        file_path,
+        filename=file_path.name,
+        media_type=response_type,
+        content_disposition_type="inline" if not download and preview_type else "attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @app.get("/v1/conversations/{conversation_id}/workspace")
@@ -1175,6 +1322,7 @@ async def get_task_result(task_id: str, request: Request):
             "conversation_id": task.get("conversation_id"),
             "turn_sequence": task.get("turn_sequence"),
         },
+        "workspace_changes": _workspace_changes_response(task),
         "skills": task.get("skills", []),
         "requested_skills": task.get("requested_skills", []),
         "loaded_skills": _loaded_skills(result_dir, task.get("skills", [])),

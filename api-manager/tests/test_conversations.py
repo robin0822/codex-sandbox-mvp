@@ -86,10 +86,19 @@ class ConversationTest(unittest.TestCase):
         listing = self.client.get(f"/v1/conversations/{first}/files", headers=self.alice)
         self.assertEqual(listing.status_code, 200, listing.text)
         self.assertEqual(listing.json()["items"][0]["path"], "hello.txt")
+        self.assertEqual(listing.json()["items"][0]["preview_type"], "text")
+        self.assertTrue(listing.json()["items"][0]["previewable"])
         content = self.client.get(
             f"/v1/conversations/{first}/files/content?path=hello.txt", headers=self.alice
         )
         self.assertEqual(content.content.decode(), "第一轮文件")
+        self.assertIn("inline", content.headers["content-disposition"])
+        self.assertTrue(content.headers["content-type"].startswith("text/plain"))
+        download = self.client.get(
+            f"/v1/conversations/{first}/files/content?path=hello.txt&download=true", headers=self.alice
+        )
+        self.assertIn("attachment", download.headers["content-disposition"])
+        self.assertEqual(download.headers["content-type"], "application/octet-stream")
         self.assertEqual(
             self.client.get(f"/v1/conversations/{first}/files", headers=self.bob).status_code, 404
         )

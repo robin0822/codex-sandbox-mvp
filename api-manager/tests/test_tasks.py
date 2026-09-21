@@ -47,10 +47,13 @@ class FakeDocker:
         self.container = container
         self.options = None
         self.containers = self
+        self.on_run = None
 
     def run(self, image, **options):
         self.options = options
         self.image = image
+        if self.on_run:
+            self.on_run()
         return self.container
 
     def get(self, name):
@@ -141,6 +144,59 @@ class TaskLifecycleTest(unittest.TestCase):
             item["bind"] for item in self.docker.options["volumes"].values()
         })
         self.assertTrue(workspace.is_dir())
+
+    def test_conversation_task_reports_created_modified_and_deleted_files(self):
+        conversation_id = "6" * 32
+        workspace = main._create_workspace("local-dev", conversation_id)
+        (workspace / "same.txt").write_text("same", encoding="utf-8")
+        (workspace / "modify.md").write_text("old", encoding="utf-8")
+        (workspace / "delete.txt").write_text("remove", encoding="utf-8")
+        (workspace / ".git").mkdir()
+        (workspace / ".git" / "ignored").write_text("old", encoding="utf-8")
+        task = main._create_task_files(
+            None, "Update files", "local-dev", [], [], conversation_id, None,
+            "conversation_workspace", 1,
+        )
+        (self.root / "results" / task["task_id"] / "exit-code.txt").write_text("0")
+
+        def mutate_workspace():
+            (workspace / "modify.md").write_text("new", encoding="utf-8")
+            (workspace / "delete.txt").unlink()
+            (workspace / "report.json").write_text('{"ok": true}', encoding="utf-8")
+            (workspace / "pixel.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            (workspace / ".git" / "ignored").write_text("new", encoding="utf-8")
+
+        self.docker.on_run = mutate_workspace
+        main._run_task(task["task_id"])
+        result = self.client.get(f"/v1/tasks/{task['task_id']}/result")
+        self.assertEqual(result.status_code, 200, result.text)
+        changes = result.json()["workspace_changes"]
+        self.assertEqual([item["path"] for item in changes["created"]], ["pixel.png", "report.json"])
+        self.assertEqual([item["path"] for item in changes["modified"]], ["modify.md"])
+        self.assertEqual([item["path"] for item in changes["deleted"]], ["delete.txt"])
+        self.assertEqual(changes["created"][0]["preview_type"], "image")
+        self.assertEqual(changes["created"][1]["preview_type"], "json")
+        self.assertTrue(changes["created"][1]["preview_url"].endswith("path=report.json"))
+        self.assertTrue(changes["created"][1]["download_url"].endswith("&download=true"))
+        self.assertEqual(
+            changes["download_all_url"], f"/v1/conversations/{conversation_id}/workspace"
+        )
+
+    def test_first_phase_preview_types(self):
+        expected = {
+            "README.md": "markdown",
+            "notes.txt": "text",
+            "main.py": "code",
+            "data.json": "json",
+            "photo.jpg": "image",
+            "report.pdf": "pdf",
+            "archive.zip": None,
+        }
+        for path, preview_type in expected.items():
+            with self.subTest(path=path):
+                metadata = main._workspace_file_metadata(path, {"size_bytes": 12})
+                self.assertEqual(metadata["preview_type"], preview_type)
+                self.assertEqual(metadata["previewable"], preview_type is not None)
 
     def test_zero_task_timeout_waits_for_runner_to_finish(self):
         self.container.status = "running"
