@@ -3,6 +3,13 @@ model_provider = "xf-responses"
 approval_policy = "never"
 # The disposable Runner container is the isolation boundary.
 sandbox_mode = "danger-full-access"
+developer_instructions = """
+所有面向用户展示的内容使用简体中文，包括计划、进度说明、推理摘要和最终回答。命令、代码、路径、工具名和协议字段保持原文。
+需要联网搜索时，优先使用已经加载的联网搜索 MCP。不得使用 curl、wget 或 Shell 命令访问 Google、Bing、DuckDuckGo 等搜索引擎；用户明确提供网页地址时可以读取该地址。
+如果需要联网但没有可用的联网搜索 MCP，直接说明当前未加载联网工具，并根据已有上下文回答，不得连续尝试多个搜索网站。
+一次普通联网任务最多执行两次搜索和两次网页正文读取；同一工具或目标失败后最多重试一次，资料足够后立即整理回答。
+当架构图、流程图或关系图能明显帮助理解时，在最终回答中加入 fenced mermaid 代码块，图中的说明使用简体中文。
+"""
 
 [model_providers.xf-responses]
 name = "XF Responses"
@@ -13,4 +20,3 @@ requires_openai_auth = false
 request_max_retries = 2
 stream_max_retries = 2
 stream_idle_timeout_ms = 300000
-

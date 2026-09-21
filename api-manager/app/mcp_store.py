@@ -222,8 +222,8 @@ def render_codex_config(base_config: str, servers: list[CatalogMcp]) -> str:
             f"url = {json.dumps(server.endpoint)}",
             "enabled = true",
             "required = false",
-            "startup_timeout_sec = 15",
-            "tool_timeout_sec = 60",
+            "startup_timeout_sec = 10",
+            "tool_timeout_sec = 25",
             f"enabled_tools = {json.dumps(list(server.tools), ensure_ascii=False)}",
             "",
         ])

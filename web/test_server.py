@@ -96,6 +96,9 @@ class LocalPreviewTest(unittest.TestCase):
         with urlopen(self.base + "/vendor/dompurify/purify.min.js") as response:
             self.assertEqual(response.status, 200)
             self.assertGreater(len(response.read()), 1000)
+        with urlopen(self.base + "/vendor/mermaid/mermaid.min.js") as response:
+            self.assertEqual(response.status, 200)
+            self.assertGreater(len(response.read()), 100000)
         with urlopen(self.base + "/api/status") as response:
             self.assertTrue(json.load(response)["ready"])
 

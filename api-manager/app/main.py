@@ -1034,6 +1034,10 @@ async def create_turn(conversation_id: str, body: TurnRequest, request: Request,
                     Turn.assistant_message.is_not(None),
                 ).order_by(Turn.sequence.desc()).limit(MAX_HISTORY_ROUNDS)).all()
                 prompt, rounds = _render_prompt(message, list(reversed(recent)))
+                routing_parts = [f"本轮：{message}"]
+                if recent:
+                    routing_parts.append(f"上轮：{recent[0].user_message}")
+                mcp_routing_text = "\n".join(routing_parts)
                 next_sequence = (db.scalar(select(func.max(Turn.sequence)).where(
                     Turn.conversation_id == conversation_id
                 )) or 0) + 1
@@ -1050,7 +1054,7 @@ async def create_turn(conversation_id: str, body: TurnRequest, request: Request,
                 task = _create_task_files(
                     repository, prompt, user_id, body.skill_ids, body.mcp_ids,
                     conversation_id, turn_id, conversation.workspace_type, next_sequence,
-                    mcp_routing_text=message,
+                    mcp_routing_text=mcp_routing_text,
                 )
                 db.add(Turn(
                     id=turn_id, conversation_id=conversation_id, sequence=next_sequence,

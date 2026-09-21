@@ -515,6 +515,58 @@ function node(tag, className, text) {
 
 const markdown = typeof window.markdownit === "function"
   ? window.markdownit({ html: false, linkify: true, breaks: true }) : null;
+let mermaidSequence = 0;
+let mermaidLoader = null;
+
+function loadMermaid() {
+  if (window.mermaid) return Promise.resolve(window.mermaid);
+  if (mermaidLoader) return mermaidLoader;
+  mermaidLoader = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/vendor/mermaid/mermaid.min.js";
+    script.onload = () => {
+      window.mermaid.initialize({
+        startOnLoad: false, securityLevel: "strict", theme: "neutral",
+        flowchart: { htmlLabels: false, curve: "basis" },
+      });
+      resolve(window.mermaid);
+    };
+    script.onerror = () => reject(new Error("Mermaid 组件加载失败"));
+    document.head.append(script);
+  });
+  return mermaidLoader;
+}
+
+async function renderMermaidBlocks(element) {
+  const blocks = [...element.querySelectorAll("pre > code.language-mermaid")];
+  if (!blocks.length) return;
+  let mermaid;
+  try {
+    mermaid = await loadMermaid();
+  } catch (error) {
+    for (const code of blocks) {
+      const fallback = node("pre", "mermaid-artifact is-error", code.textContent);
+      code.parentElement.replaceWith(fallback);
+    }
+    return;
+  }
+  for (const code of blocks) {
+    const shell = node("div", "mermaid-artifact is-loading");
+    shell.append(node("div", "artifact-skeleton"), node("p", null, "正在渲染架构图…"));
+    code.parentElement.replaceWith(shell);
+    try {
+      const result = await mermaid.render(`mermaid-artifact-${++mermaidSequence}`, code.textContent);
+      shell.classList.remove("is-loading");
+      // Mermaid runs in strict mode, which encodes diagram HTML and disables
+      // interactive links before producing this SVG.
+      shell.innerHTML = result.svg;
+    } catch (error) {
+      shell.classList.remove("is-loading");
+      shell.classList.add("is-error");
+      shell.textContent = "架构图渲染失败：" + error.message;
+    }
+  }
+}
 
 function markdownNode(text, className) {
   const element = node("div", className + " markdown-body");
@@ -527,74 +579,122 @@ function markdownNode(text, className) {
     link.target = "_blank";
     link.rel = "noopener noreferrer";
   }
+  requestAnimationFrame(() => renderMermaidBlocks(element));
   return element;
+}
+
+function hiddenRuntimeNotice(event) {
+  const message = event?.item?.message || event?.message || "";
+  return message.includes("Model metadata for `xopglm53` not found");
+}
+
+function hasChinese(text) {
+  return /[\u3400-\u9fff]/.test(text || "");
+}
+
+function commandActivity(item, running) {
+  const command = item.command || "";
+  const failed = item.status === "failed" || Number(item.exit_code) > 0;
+  if (/SKILL\.md|\.agents\/skills|\.codex\/skills/.test(command)) {
+    return { title: running ? "正在加载任务技能" : failed ? "技能读取失败" : "已读取技能说明",
+      desc: running ? "正在准备完成任务需要的专业能力" : failed ? "技能文件未能成功读取" : "任务所需技能已经就绪",
+      kind: failed ? "error" : "skill", stageKey: "skill-read" };
+  }
+  if (/\bcurl\b|\bwget\b|https?:\/\//i.test(command)) {
+    return { title: running ? "正在获取外部资料" : failed ? "外部资料获取失败" : "已获取外部资料",
+      desc: failed ? "当前来源未能成功访问，正在调整处理方式"
+        : running ? "正在读取与问题相关的公开信息" : "相关公开信息已经读取完成",
+      kind: failed ? "error" : "search", stageKey: "external-fetch" };
+  }
+  if (/\b(pwd|ls|find|rg|git status|git diff)\b/.test(command)) {
+    return { title: running ? "正在检查工作区" : failed ? "工作区检查失败" : "已检查当前工作区",
+      desc: running ? "正在确认当前窗口中的文件和项目状态" : "当前窗口的文件和项目状态已经确认",
+      kind: failed ? "error" : "workspace", stageKey: "workspace-check" };
+  }
+  if (/apply_patch|cat\s+>|tee\s+|sed\s+-i|mkdir|cp\s+|mv\s+/.test(command)) {
+    return { title: running ? "正在处理工作区文件" : failed ? "文件处理失败" : "已完成文件处理",
+      desc: running ? "正在按照要求写入或更新文件" : "要求的文件操作已经完成",
+      kind: failed ? "error" : "file", stageKey: "file-work" };
+  }
+  return { title: running ? "正在执行任务步骤" : failed ? "任务步骤执行失败" : "已完成任务步骤",
+    desc: running ? "Codex 正在调用本地工具继续处理" : "本地工具步骤已经结束",
+    kind: failed ? "error" : "normal", stageKey: `command-${item.id || "general"}` };
 }
 
 function describeEvent(event) {
   const type = event?.type || "unknown";
   const item = event.item || {};
-  if (type === "system") return { title: event.title, desc: event.message || "", kind: "normal" };
-  if (type === "thread.started") return { title: "Codex 已启动", desc: "开始处理当前任务", kind: "normal" };
-  if (type === "turn.started") return { title: "正在分析问题", desc: "正在读取项目并规划操作", kind: "normal" };
+  if (type === "system") return { title: event.title, desc: event.message || "", kind: "normal", stageKey: event.title };
+  if (type === "thread.started") return { title: "已启动任务环境", desc: "Codex 已开始处理当前问题", kind: "normal", stageKey: "startup" };
+  if (type === "turn.started") return { title: "正在理解你的问题", desc: "正在结合对话上下文确定处理步骤", kind: "active", stageKey: "understand" };
   if (type === "turn.completed") {
     const usage = event.usage || {};
     return {
-      title: "本轮执行完毕",
+      title: "已完成内容整理",
       desc: usage.input_tokens || usage.output_tokens
         ? "输入 " + (usage.input_tokens ?? "—") + " · 输出 " + (usage.output_tokens ?? "—")
           + " · 推理 " + (usage.reasoning_output_tokens ?? "—") + " tokens"
-        : "正在整理最终结果",
-      kind: "message",
+        : "最终结果已经生成",
+      kind: "done", stageKey: "complete",
     };
   }
   if (type === "error" || type === "turn.failed") {
-    return { title: "执行出错", desc: String(event.error?.message || event.message || type), kind: "error" };
+    return { title: "执行遇到问题", desc: String(event.error?.message || event.message || type), kind: "error", stageKey: "task-error" };
   }
   if (type === "skill.loaded") {
-    return { title: "Codex 已加载技能", desc: `$${event.skill_id} 的技能说明已加入本轮上下文`,
-      kind: "skill", skillId: event.skill_id };
+    return { title: "已加载专业技能", desc: `$${event.skill_id} 已加入本轮任务`,
+      kind: "skill", skillId: event.skill_id, stageKey: `skill-${event.skill_id}` };
   }
   if (type === "skill.read") {
-    return { title: "已读取技能文件", desc: `Codex 已通过命令读取 $${event.skill_id} 的 SKILL.md`,
-      kind: "normal", skillId: event.skill_id };
+    return { title: "已读取技能说明", desc: `$${event.skill_id} 已准备完成任务所需的处理规则`,
+      kind: "skill", skillId: event.skill_id, stageKey: `skill-${event.skill_id}` };
   }
-  if (type.startsWith("item.") && item.type === "reasoning") {
-    return { title: "推理摘要", desc: item.text || "", kind: "reasoning" };
-  }
+  if (type.startsWith("item.") && item.type === "reasoning") return null;
   if (type.startsWith("item.") && item.type === "command_execution") {
-    return {
-      title: type === "item.started" ? "正在执行命令" : "命令执行完毕",
-      desc: item.command || "命令",
-      output: item.aggregated_output || item.output || "",
-      kind: "command",
-    };
+    return commandActivity(item, type === "item.started" || item.status === "in_progress");
   }
   if (type.startsWith("item.") && item.type === "agent_message") {
-    return { title: "Codex 回复", desc: item.text || "", kind: "message" };
+    const text = (item.text || "").trim();
+    const conciseChinese = hasChinese(text) && text.length <= 220;
+    return { title: /架构|流程|可视化|示意图/.test(text) ? "正在生成可视化结果" : "正在整理输出内容",
+      desc: conciseChinese ? text : "正在根据已获得的信息组织最终回答",
+      kind: "active", stageKey: /架构|流程|可视化|示意图/.test(text) ? "visualize" : "compose",
+      visualizing: /架构|流程|可视化|示意图/.test(text) };
   }
   if (type.startsWith("item.") && item.type === "file_change") {
-    return { title: "文件发生变更", desc: (item.changes || []).map((change) => change.path).join("、"), kind: "command" };
+    return { title: "已更新工作区文件", desc: (item.changes || []).map((change) => change.path).join("、"),
+      kind: "file", stageKey: "file-change" };
   }
   if (type.startsWith("item.") && item.type === "error") {
-    return { title: "运行提示", desc: item.message || "", kind: "error" };
+    const message = item.message || "";
+    if (hiddenRuntimeNotice(event)) return null;
+    return { title: "运行提示", desc: message, kind: "error", stageKey: `error-${item.id || message.slice(0, 40)}` };
   }
   if (type.startsWith("item.") && item.type === "mcp_tool_call") {
     const running = type === "item.started" || item.status === "in_progress";
     const failed = item.status === "failed" || item.error;
+    const tool = item.tool || "";
+    const searching = /search/i.test(tool);
+    const fetching = /fetch|read|get_article|get_summary/i.test(tool);
     return {
-      title: failed ? "MCP 工具调用失败" : running ? "正在调用 MCP 工具" : "MCP 工具调用完成",
-      desc: `${item.server || ""} / ${item.tool || ""}`,
-      output: failed ? (item.error?.message || String(item.error)) : "",
-      kind: failed ? "error" : "mcp",
+      title: failed ? "联网工具调用失败" : running
+        ? searching ? "正在并行检索补充信息" : fetching ? "正在阅读相关资料" : "正在调用专业工具"
+        : searching ? "已完成联网检索" : fetching ? "已读取相关资料" : "专业工具调用完成",
+      desc: failed ? (item.error?.message || String(item.error))
+        : running ? `${item.server || "MCP"} 正在提供本轮任务需要的信息`
+          : `${item.server || "MCP"} 已提供本轮任务需要的信息`,
+      kind: failed ? "error" : searching || fetching ? "search" : "mcp",
+      stageKey: searching ? "mcp-search" : fetching ? "mcp-fetch" : `mcp-${item.server || "tool"}-${tool}`,
     };
   }
   if (type.startsWith("item.") && item.type === "web_search") {
-    return { title: "联网搜索", desc: JSON.stringify(item.action || {}), kind: "command" };
+    return { title: "正在检索公开资料", desc: "正在搜索与问题相关的最新信息", kind: "search", stageKey: "web-search" };
   }
   if (type.startsWith("item.") && item.type === "todo_list") {
-    return { title: "执行计划", desc: (item.items || []).map((step) => `${step.completed ? "✓" : "○"} ${step.text}`).join("\n"), kind: "normal" };
+    return { title: "已明确处理步骤", desc: (item.items || []).map((step) => `${step.completed ? "✓" : "○"} ${step.text}`).join("\n"),
+      kind: "normal", stageKey: "plan" };
   }
-  return { title: "事件 · " + type, desc: item.type || event.message || "", kind: "normal" };
+  return null;
 }
 
 function renderEvent(item, parent) {
@@ -604,11 +704,6 @@ function renderEvent(item, parent) {
   body.append(node("div", "event-title", item.title), item.kind === "reasoning"
     ? markdownNode(item.desc, "event-desc") : node("div", "event-desc", item.desc));
   if (item.output) body.append(node("pre", "event-output", String(item.output).slice(0, 8000)));
-  if (item.raw) {
-    const details = node("details", "event-raw");
-    details.append(node("summary", null, "查看原始事件"), node("pre", null, item.raw));
-    body.append(details);
-  }
   row.append(dot, body, node("span", "event-time", clock(item.time)));
   parent.append(row);
   parent.scrollTop = parent.scrollHeight;
@@ -618,20 +713,31 @@ function followLiveOutput(turn) {
   const running = ["starting", "running", "cancelling"].includes(turn.status);
   if (!running || state.liveTurnId !== turn.id) return;
   requestAnimationFrame(() => {
+    const article = document.querySelector('[data-turn-id="' + turn.id + '"]');
+    const eventList = article?.querySelector(".event-list");
+    if (eventList) eventList.scrollTop = eventList.scrollHeight;
     const scroll = $("chat-scroll");
     scroll.scrollTop = scroll.scrollHeight;
   });
 }
 
 function addEvent(turn, event, envelope = null) {
+  if (hiddenRuntimeNotice(event)) return;
+  turn.rawEvents ||= [];
+  if (envelope) {
+    turn.rawEvents.push(JSON.stringify(envelope, null, 2).slice(0, 6000));
+    turn.rawEvents = turn.rawEvents.slice(-30);
+  }
   const detail = describeEvent(event);
+  if (!detail) return;
   const item = {
     ...detail, time: envelope?.timestamp || new Date().toISOString(),
-    raw: envelope ? JSON.stringify(envelope, null, 2).slice(0, 12000) : "",
     itemId: event.item?.id || null,
   };
   turn.events ||= [];
-  const existing = item.itemId ? turn.events.findIndex((entry) => entry.itemId === item.itemId) : -1;
+  const existing = item.stageKey
+    ? turn.events.findIndex((entry) => entry.stageKey === item.stageKey)
+    : item.itemId ? turn.events.findIndex((entry) => entry.itemId === item.itemId) : -1;
   if (existing >= 0) turn.events[existing] = item;
   else turn.events.push(item);
   turn.events = turn.events.slice(-100);
@@ -644,6 +750,13 @@ function addEvent(turn, event, envelope = null) {
   followLiveOutput(turn);
 }
 
+function elapsedText(turn) {
+  const start = new Date(turn.created_at).getTime();
+  const end = turn.completed_at ? new Date(turn.completed_at).getTime() : Date.now();
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  return seconds < 60 ? `已处理 ${seconds} 秒` : `已处理 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+}
+
 function renderProgress(turn) {
   const running = ["starting", "running", "cancelling"].includes(turn.status);
   const expanded = turn.progressOpen ?? running;
@@ -652,28 +765,31 @@ function renderProgress(turn) {
   heading.type = "button";
   heading.setAttribute("aria-expanded", String(expanded));
   const left = node("span");
-  left.append(node("i", "activity-dot"), node("strong", null, running ? "正在处理你的问题" : "执行过程"));
-  left.append(node("small", "event-count", (turn.events?.length || 0) + " 条事件"));
+  left.append(node("i", "activity-dot"), node("strong", null, running ? "正在处理你的问题" : "处理过程"));
+  const elapsed = node("small", "elapsed-time", elapsedText(turn));
+  elapsed.dataset.startedAt = turn.created_at;
+  if (turn.completed_at) elapsed.dataset.completedAt = turn.completed_at;
+  left.append(elapsed);
   const chevron = node("span", "chevron", expanded ? "⌃" : "⌄");
   heading.append(left, chevron);
   const content = node("div", "progress-content" + (expanded ? "" : " hidden"));
-  content.append(node("div", "progress-section-label", "推理摘要"));
-  const reasoning = (turn.events || []).filter((event) => event.kind === "reasoning");
-  if (reasoning.length) {
-    const summaries = node("div", "reasoning-list");
-    for (const event of reasoning) renderEvent(event, summaries);
-    content.append(summaries);
-  } else {
-    const completed = (turn.events || []).some((event) => event.title === "本轮执行完毕");
-    content.append(node("p", "reasoning-empty", completed
-      ? "本次模型未提供可展示的推理摘要。" : "等待模型返回可展示的推理摘要…"));
-  }
   content.append(node("div", "progress-section-label", "执行进度"));
   const eventList = node("div", "event-list");
   eventList.setAttribute("role", "log");
   eventList.setAttribute("aria-live", "polite");
-  for (const event of turn.events || []) if (event.kind !== "reasoning") renderEvent(event, eventList);
+  for (const event of turn.events || []) renderEvent(event, eventList);
   content.append(eventList, node("div", "stream-note" + (turn.events?.length ? " hidden" : ""), "任务事件会实时出现在这里。"));
+  if (running && (turn.events || []).some((event) => event.visualizing)) {
+    const visual = node("div", "artifact-preview is-loading");
+    visual.append(node("div", "artifact-skeleton"), node("p", null, "正在生成可视化结果…"));
+    content.append(visual);
+  }
+  if (turn.rawEvents?.length) {
+    const technical = node("details", "technical-events");
+    technical.append(node("summary", null, "查看技术详情"),
+      node("pre", null, turn.rawEvents.join("\n\n")));
+    content.append(technical);
+  }
   heading.addEventListener("click", () => {
     const isOpen = heading.getAttribute("aria-expanded") === "true";
     turn.progressOpen = !isOpen;
@@ -855,6 +971,7 @@ async function finishLive(turn) {
     turn.result = result;
     turn.status = result.status;
     turn.assistant_message = result.final_message || result.error || "";
+    turn.completed_at = result.finished_at || new Date().toISOString();
     turn.progressOpen = true;
     if (state.turns.includes(turn)) renderTurns();
   } catch (error) {
@@ -937,11 +1054,11 @@ async function sendPrompt() {
     clearCapabilitySelection();
     updatePromptCount();
     renderTurns();
-    addEvent(turn, { type: "system", title: "任务已创建", message: "正在启动独立 Runner。" });
-    if (skillIds.length) addEvent(turn, { type: "system", title: "已指定本轮技能", message: skillIds.map((id) => `$${id}`).join("、") });
-    if (mcpIds.length) addEvent(turn, { type: "system", title: "已指定本轮 MCP", message: mcpIds.join("、") });
+    addEvent(turn, { type: "system", title: "正在准备运行环境", message: "正在启动本轮独立任务环境" });
+    if (skillIds.length) addEvent(turn, { type: "system", title: "正在准备专业技能", message: skillIds.map((id) => `$${id}`).join("、") });
+    if (mcpIds.length) addEvent(turn, { type: "system", title: "已准备外部工具", message: mcpIds.join("、") });
     if (!mcpIds.length && task.auto_mcps?.length) {
-      addEvent(turn, { type: "system", title: "已自动加载 MCP", message: task.auto_mcps.join("、") });
+      addEvent(turn, { type: "system", title: "已根据问题准备联网能力", message: task.auto_mcps.join("、") });
     }
     connectEvents(turn);
     loadConversations().catch(() => {});
@@ -1174,5 +1291,12 @@ for (const suggestion of document.querySelectorAll(".suggestion")) {
     $("prompt-input").focus();
   });
 }
+setInterval(() => {
+  for (const element of document.querySelectorAll(".elapsed-time:not([data-completed-at])")) {
+    const seconds = Math.max(0, Math.round((Date.now() - new Date(element.dataset.startedAt).getTime()) / 1000));
+    element.textContent = seconds < 60 ? `已处理 ${seconds} 秒`
+      : `已处理 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+  }
+}, 1000);
 setProjectForm();
 initialize();

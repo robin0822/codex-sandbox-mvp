@@ -94,6 +94,8 @@ class McpMarketplaceTest(unittest.TestCase):
         self.assertIn('[mcp_servers."exa-search"]', exa)
         self.assertIn('url = "https://mcp.exa.ai/mcp"', exa)
         self.assertIn('enabled_tools = ["web_search_exa", "web_fetch_exa"]', exa)
+        self.assertIn("startup_timeout_sec = 10", exa)
+        self.assertIn("tool_timeout_sec = 25", exa)
 
     def test_installed_mcp_is_automatically_routed_without_prompt_injection(self):
         self.client.post("/v1/mcp/exa-search/install", headers=self.alice)

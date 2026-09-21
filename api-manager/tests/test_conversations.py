@@ -249,6 +249,21 @@ class ConversationTest(unittest.TestCase):
         config = (self.root / "tasks" / task_id / "codex-config.toml").read_text()
         self.assertIn('[mcp_servers."exa-search"]', config)
 
+    def test_follow_up_inherits_search_intent_from_immediately_previous_question(self):
+        self.client.post("/v1/mcp/exa-search/install", headers=self.alice)
+        conversation_id = self.create_conversation()
+        first = self.post_turn(conversation_id, "查询最近的 Agent 智能体相关新闻")
+        self.assertEqual(first.status_code, 202, first.text)
+
+        follow_up = self.post_turn(conversation_id, "腾讯云 WorkBuddy 接入启元机器人是怎么回事？")
+        self.assertEqual(follow_up.status_code, 202, follow_up.text)
+        self.assertEqual(follow_up.json()["mcps"], ["exa-search"])
+        self.assertEqual(follow_up.json()["mcp_selection"], "auto")
+
+        unrelated = self.post_turn(conversation_id, "在工作区创建 test.txt")
+        self.assertEqual(unrelated.status_code, 202, unrelated.text)
+        self.assertEqual(unrelated.json()["mcps"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
