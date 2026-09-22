@@ -242,6 +242,7 @@ def _workspace_file_metadata(relative: str, fingerprint: dict) -> dict:
         "path": relative,
         "name": path.name,
         "size_bytes": size,
+        "sha256": fingerprint.get("sha256"),
         "mime_type": mime_type,
         "preview_type": preview_type,
         "previewable": bool(preview_type and (preview_type in {"image", "pdf"} or size <= TEXT_PREVIEW_LIMIT)),
@@ -261,18 +262,22 @@ def _workspace_snapshot(root: Path) -> dict[str, dict]:
             if path.is_symlink() or not path.is_file():
                 continue
             stat = path.stat()
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
             snapshot[relative_path.as_posix()] = {
                 "size_bytes": stat.st_size,
                 "modified_ns": stat.st_mtime_ns,
-                "sha256": digest.hexdigest(),
+                "sha256": _file_sha256(path),
             }
         except OSError:
             continue
     return snapshot
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _workspace_changes(before: dict[str, dict], after: dict[str, dict]) -> dict:
@@ -301,22 +306,56 @@ def _stored_workspace_changes(task_id: str) -> dict:
     }
 
 
+def _save_turn_files(task_id: str, workspace: Path, changes: dict) -> None:
+    """Persist only this turn's created and modified files before another turn can change them."""
+    result_dir = RESULT_DIR / task_id
+    files_dir = result_dir / "turn-files"
+    archive_path = result_dir / "turn-files.tar.gz"
+    files = changes["created"] + changes["modified"]
+    if not files:
+        return
+    staging = result_dir / "turn-files.tmp"
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        for item in files:
+            relative = item["path"]
+            source = _safe_workspace_entry(workspace, relative)
+            if source.is_symlink() or not source.is_file():
+                raise OSError(f"changed file is unavailable: {relative}")
+            target = staging / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            if _file_sha256(target) != item["sha256"]:
+                raise OSError(f"changed file changed during capture: {relative}")
+            target.chmod(0o444)
+        with tarfile.open(archive_path, "w:gz") as archive:
+            for item in files:
+                relative = item["path"]
+                archive.add(staging / relative, arcname=f"files/{relative}", recursive=False)
+        staging.rename(files_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        archive_path.unlink(missing_ok=True)
+        raise
+
+
 def _workspace_changes_response(task: dict) -> dict:
     changes = _stored_workspace_changes(task["task_id"])
-    conversation_id = task.get("conversation_id")
-    if not conversation_id:
-        return {**changes, "download_all_url": None}
+    task_id = task["task_id"]
+    files_dir = RESULT_DIR / task_id / "turn-files"
     for change_type in ("created", "modified"):
         for item in changes[change_type]:
-            base = (
-                f"/v1/conversations/{conversation_id}/files/content"
-                f"?path={quote(item['path'], safe='')}"
-            )
-            item["preview_url"] = base if item.get("previewable") else None
-            item["download_url"] = base + "&download=true"
+            saved = files_dir / item["path"]
+            available = saved.is_file() and not saved.is_symlink()
+            base = f"/v1/tasks/{task_id}/files/content?path={quote(item['path'], safe='')}"
+            item["preview_url"] = base if available and item.get("previewable") else None
+            item["download_url"] = base + "&download=true" if available else None
     return {
         **changes,
-        "download_all_url": f"/v1/conversations/{conversation_id}/workspace",
+        "download_all_url": (
+            f"/v1/tasks/{task_id}/files/archive"
+            if (RESULT_DIR / task_id / "turn-files.tar.gz").is_file() else None
+        ),
     }
 
 
@@ -332,7 +371,7 @@ def _turn_data(turn: Turn) -> dict:
         "context_rounds_used": turn.context_rounds_used,
         "created_at": turn.created_at.isoformat(),
         "completed_at": turn.completed_at.isoformat() if turn.completed_at else None,
-        "workspace_changes": _stored_workspace_changes(turn.task_id),
+        "workspace_changes": _workspace_changes_response({"task_id": turn.task_id}),
     }
 
 
@@ -666,7 +705,7 @@ async def _stream_task_events(task_id: str, after_sequence: int):
 def _run_task(task_id: str) -> None:
     container = None
     task = _read_task(task_id)
-    workspace_before = {}
+    workspace_before = None
     try:
         if task.get("cancel_requested_at"):
             task["status"] = "cancelled"
@@ -788,7 +827,7 @@ def _run_task(task_id: str) -> None:
                 container.remove(force=True)
             except DockerException as exc:
                 task["cleanup_error"] = type(exc).__name__
-        if task.get("execution_mode") == "conversation_workspace" and task.get("conversation_id"):
+        if workspace_before is not None and task.get("execution_mode") == "conversation_workspace" and task.get("conversation_id"):
             try:
                 workspace_after = _workspace_snapshot(
                     _workspace_path(task["user_id"], task["conversation_id"])
@@ -796,6 +835,9 @@ def _run_task(task_id: str) -> None:
                 changes = _workspace_changes(workspace_before, workspace_after)
                 (RESULT_DIR / task_id / "workspace-changes.json").write_text(
                     json.dumps(changes, ensure_ascii=False), encoding="utf-8"
+                )
+                _save_turn_files(
+                    task_id, _workspace_path(task["user_id"], task["conversation_id"]), changes
                 )
             except OSError as exc:
                 task["workspace_snapshot_error"] = type(exc).__name__
@@ -1048,6 +1090,10 @@ async def download_workspace_file(conversation_id: str, request: Request,
     file_path = _safe_workspace_entry(workspace, path)
     if file_path.is_symlink() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="workspace file not found")
+    return _file_preview_response(file_path, download)
+
+
+def _file_preview_response(file_path: Path, download: bool) -> FileResponse:
     mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
     preview_type = _preview_type(file_path, mime_type)
     if not download and preview_type in {"markdown", "text", "code"}:
@@ -1062,6 +1108,37 @@ async def download_workspace_file(conversation_id: str, request: Request,
         media_type=response_type,
         content_disposition_type="inline" if not download and preview_type else "attachment",
         headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@app.get("/v1/tasks/{task_id}/files/content")
+async def download_turn_file(task_id: str, request: Request,
+                             path: str = Query(..., min_length=1, max_length=1024),
+                             download: bool = Query(False)) -> FileResponse:
+    task = _owned_task(task_id, _user_id(request))
+    if task["status"] in ACTIVE_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="task is still running")
+    changes = _stored_workspace_changes(task_id)
+    allowed = {item["path"] for kind in ("created", "modified") for item in changes[kind]}
+    if path not in allowed:
+        raise HTTPException(status_code=404, detail="turn file not found")
+    file_path = _safe_workspace_entry(RESULT_DIR / task_id / "turn-files", path)
+    if file_path.is_symlink() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="turn file not found")
+    return _file_preview_response(file_path, download)
+
+
+@app.get("/v1/tasks/{task_id}/files/archive")
+async def download_turn_files_archive(task_id: str, request: Request) -> FileResponse:
+    task = _owned_task(task_id, _user_id(request))
+    if task["status"] in ACTIVE_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="task is still running")
+    archive = RESULT_DIR / task_id / "turn-files.tar.gz"
+    if not archive.is_file():
+        raise HTTPException(status_code=404, detail="turn archive not found")
+    return FileResponse(
+        archive, filename=f"turn-{task_id}-files.tar.gz",
+        media_type="application/gzip", headers={"X-Content-Type-Options": "nosniff"},
     )
 
 

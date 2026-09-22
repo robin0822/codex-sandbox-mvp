@@ -805,12 +805,6 @@ function workspaceChanges(turn) {
   return turn.result?.workspace_changes || turn.workspace_changes || { created: [], modified: [], deleted: [] };
 }
 
-function fileEndpoint(turn, path, download = false) {
-  const conversationId = turn.conversation_id || state.activeConversation?.id;
-  return `/v1/conversations/${conversationId}/files/content?path=${encodeURIComponent(path)}`
-    + (download ? "&download=true" : "");
-}
-
 function fileIcon(type) {
   return type === "image" ? "▧" : type === "pdf" ? "PDF" : type === "json" ? "{}" : type === "markdown" ? "M↓" : "</>";
 }
@@ -826,10 +820,12 @@ function renderFileCards(turn) {
   const heading = node("div", "turn-files-heading");
   const count = visible.length + (changes.deleted || []).length;
   heading.append(node("strong", null, `本轮文件 ${count}`));
-  const downloadAll = node("a", null, "下载全部");
-  downloadAll.href = changes.download_all_url || `/v1/conversations/${turn.conversation_id}/workspace`;
-  downloadAll.download = "workspace.tar.gz";
-  heading.append(downloadAll);
+  if (changes.download_all_url) {
+    const downloadAll = node("a", null, "下载本轮文件");
+    downloadAll.href = changes.download_all_url;
+    downloadAll.download = `turn-${turn.task_id}-files.tar.gz`;
+    heading.append(downloadAll);
+  }
   section.append(heading);
   const grid = node("div", "turn-file-grid");
   for (const item of visible) {
@@ -838,21 +834,26 @@ function renderFileCards(turn) {
     const copy = node("div", "turn-file-copy");
     copy.append(node("strong", null, item.name), node("span", null, `${item.changeLabel} · ${formatBytes(item.size_bytes)}`));
     const actions = node("div", "turn-file-actions");
-    if (item.previewable) {
+    if (item.preview_url) {
       const preview = node("button", null, "预览");
       preview.type = "button";
       preview.dataset.action = "file-preview";
       preview.dataset.turnId = turn.id;
-      preview.dataset.path = item.path;
       preview.dataset.name = item.name;
       preview.dataset.previewType = item.preview_type;
       preview.dataset.size = item.size_bytes;
+      preview.dataset.previewUrl = item.preview_url;
+      preview.dataset.downloadUrl = item.download_url;
       actions.append(preview);
     }
-    const download = node("a", null, "下载");
-    download.href = item.download_url || fileEndpoint(turn, item.path, true);
-    download.download = item.name;
-    actions.append(download);
+    if (item.download_url) {
+      const download = node("a", null, "下载");
+      download.href = item.download_url;
+      download.download = item.name;
+      actions.append(download);
+    } else {
+      actions.append(node("span", "turn-file-unavailable", "历史版本未保存"));
+    }
     card.append(icon, copy, actions);
     grid.append(card);
   }
@@ -868,10 +869,8 @@ function closeFilePreview() {
   $("file-preview-body").replaceChildren();
 }
 
-async function openFilePreview(turn, button) {
-  const { path, name, previewType } = button.dataset;
-  const previewUrl = fileEndpoint(turn, path);
-  const downloadUrl = fileEndpoint(turn, path, true);
+async function openFilePreview(button) {
+  const { name, previewType, previewUrl, downloadUrl } = button.dataset;
   $("file-preview-title").textContent = name;
   $("file-preview-meta").textContent = `${previewType.toUpperCase()} · ${formatBytes(Number(button.dataset.size))}`;
   $("file-preview-download").href = downloadUrl;
@@ -1352,7 +1351,7 @@ $("turn-list").addEventListener("click", async (event) => {
   if (!button) return;
   const turn = state.turns.find((item) => item.id === button.dataset.turnId);
   if (!turn) return;
-  if (button.dataset.action === "file-preview") return openFilePreview(turn, button);
+  if (button.dataset.action === "file-preview") return openFilePreview(button);
   if (button.dataset.action === "details") return openDetails(turn);
   if (button.dataset.action === "events") return loadEvents(turn);
   try {

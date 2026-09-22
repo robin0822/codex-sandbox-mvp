@@ -1,7 +1,9 @@
 import asyncio
+import io
 import json
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -177,10 +179,44 @@ class TaskLifecycleTest(unittest.TestCase):
         self.assertEqual(changes["created"][0]["preview_type"], "image")
         self.assertEqual(changes["created"][1]["preview_type"], "json")
         self.assertTrue(changes["created"][1]["preview_url"].endswith("path=report.json"))
+        self.assertIn(f"/v1/tasks/{task['task_id']}/files/content", changes["created"][1]["preview_url"])
         self.assertTrue(changes["created"][1]["download_url"].endswith("&download=true"))
         self.assertEqual(
-            changes["download_all_url"], f"/v1/conversations/{conversation_id}/workspace"
+            changes["download_all_url"], f"/v1/tasks/{task['task_id']}/files/archive"
         )
+        archive = self.client.get(changes["download_all_url"])
+        self.assertEqual(archive.status_code, 200)
+        with tarfile.open(fileobj=io.BytesIO(archive.content), mode="r:gz") as bundle:
+            self.assertEqual(bundle.getnames(), ["files/pixel.png", "files/report.json", "files/modify.md"])
+            self.assertEqual(bundle.extractfile("files/modify.md").read(), b"new")
+        old_preview = changes["modified"][0]["preview_url"]
+        self.assertEqual(self.client.get(old_preview).text, "new")
+        old_download = self.client.get(changes["modified"][0]["download_url"])
+        self.assertIn("attachment", old_download.headers["content-disposition"])
+        self.assertEqual(old_download.content, b"new")
+        self.assertEqual(
+            self.client.get(f"/v1/tasks/{task['task_id']}/files/content?path=delete.txt").status_code,
+            404,
+        )
+
+        second = main._create_task_files(
+            None, "Update files again", "local-dev", [], [], conversation_id, None,
+            "conversation_workspace", 2,
+        )
+        (self.root / "results" / second["task_id"] / "exit-code.txt").write_text("0")
+        self.docker.on_run = lambda: (
+            (workspace / "modify.md").write_text("newer", encoding="utf-8"),
+            (workspace / "report.json").unlink(),
+        )
+        main._run_task(second["task_id"])
+        second_changes = self.client.get(f"/v1/tasks/{second['task_id']}/result").json()["workspace_changes"]
+        self.assertEqual([item["path"] for item in second_changes["modified"]], ["modify.md"])
+        self.assertEqual([item["path"] for item in second_changes["deleted"]], ["report.json"])
+        self.assertEqual(self.client.get(old_preview).text, "new")
+        self.assertEqual(self.client.get(second_changes["modified"][0]["preview_url"]).text, "newer")
+        self.assertEqual(self.client.get(changes["created"][1]["preview_url"]).json(), {"ok": True})
+        with tarfile.open(fileobj=io.BytesIO(self.client.get(second_changes["download_all_url"]).content), mode="r:gz") as bundle:
+            self.assertEqual(bundle.getnames(), ["files/modify.md"])
 
     def test_first_phase_preview_types(self):
         expected = {

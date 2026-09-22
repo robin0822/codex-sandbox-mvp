@@ -124,6 +124,30 @@ class ConversationTest(unittest.TestCase):
             f"/v1/conversations/{conversation_id}", headers=self.alice
         ).status_code, 404)
 
+    def test_history_uses_owned_turn_file_versions(self):
+        conversation_id = self.create_conversation()
+        response = self.post_turn(conversation_id, "创建历史文件")
+        task_id = response.json()["task_id"]
+        workspace = main._workspace_path("alice", conversation_id)
+        (workspace / "memo.md").write_text("# 第一版\n", encoding="utf-8")
+        changes = main._workspace_changes({}, main._workspace_snapshot(workspace))
+        main._save_turn_files(task_id, workspace, changes)
+        (self.root / "results" / task_id / "workspace-changes.json").write_text(
+            json.dumps(changes), encoding="utf-8"
+        )
+        (workspace / "memo.md").write_text("# 第二版\n", encoding="utf-8")
+
+        history = self.client.get(
+            f"/v1/conversations/{conversation_id}/turns", headers=self.alice
+        ).json()["items"][0]["workspace_changes"]
+        saved = history["created"][0]
+        self.assertEqual(self.client.get(saved["preview_url"], headers=self.alice).text, "# 第一版\n")
+        self.assertEqual(self.client.get(history["download_all_url"], headers=self.alice).status_code, 200)
+        self.assertEqual(self.client.get(saved["download_url"], headers=self.bob).status_code, 404)
+        self.assertEqual(self.client.get(history["download_all_url"], headers=self.bob).status_code, 404)
+        self.client.delete(f"/v1/conversations/{conversation_id}", headers=self.alice)
+        self.assertEqual(self.client.get(saved["preview_url"], headers=self.alice).status_code, 404)
+
     def post_turn(self, conversation_id, message, headers=None, request_id=None,
                   skill_ids=None, mcp_ids=None):
         body = {"message": message}

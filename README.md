@@ -84,9 +84,13 @@ Runner 仍使用 `codex exec --ephemeral`：Codex 自身不保存会话，交流
 | `GET /v1/conversations/{id}/files` | 浏览当前窗口工作区文件 |
 | `GET /v1/conversations/{id}/files/content?path=...` | 下载工作区中的单个文件 |
 | `GET /v1/conversations/{id}/workspace` | 下载排除构建缓存与内部 Git 的工作区压缩包 |
+| `GET /v1/tasks/{task_id}/files/content?path=...` | 预览本轮保存的文件版本；追加 `&download=true` 下载 |
+| `GET /v1/tasks/{task_id}/files/archive` | 下载仅包含本轮新增、修改文件的压缩包 |
 | `DELETE /v1/conversations/{id}` | 删除窗口、历史、任务结果和工作区 |
 
 提交示例：`{"message":"继续解释上一条回答","request_id":"client-generated-id"}`。`request_id` 用于安全重试，不能在同一窗口复用到不同问题。每个窗口同时只允许一个运行中的任务；其他窗口仍受 `MAX_ACTIVE_TASKS` 全局限制。原有单次任务接口和 Runner 创建、销毁流程保持不变。
+
+每轮结束时，Manager 会比较工作区前后的内容哈希，并把本轮新增、修改的文件保存到该任务的只读结果目录。回答中的预览与单文件下载读取这个历史版本，“下载本轮文件”只打包这些文件；顶部“下载工作区”仍导出当前窗口的全部文件。删除文件只在本轮清单中记录路径，不会放进压缩包。升级前的旧任务没有历史副本，页面会标明“历史版本未保存”，不会错误地展示当前工作区内容。
 
 `USER_API_KEYS_JSON` 可配置用户与 API Key。在 `.env` 中写入 `USER_API_KEYS_JSON='{"alice":"replace-with-random-key","bob":"replace-with-another-key"}'`，并设 `ALLOW_LOCAL_DEV_USER=0`。配置后，所有对话和任务接口要求 `Authorization: Bearer <key>`，任务事件、结果和产物也按所有者校验。未配置时仅用于本地实验，所有请求属于 `local-dev`。浏览器输入的 Key 只保存在本地 Web 服务进程的短时会话中，浏览器只收 HttpOnly Cookie。
 

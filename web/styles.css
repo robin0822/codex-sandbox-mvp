@@ -229,6 +229,7 @@ button { cursor: pointer; }
 .turn-file-copy span { margin-top: 4px; color: #9aa6b4; font-size: 9px; }
 .turn-file-actions { display: flex; gap: 7px; }
 .turn-file-actions button, .turn-file-actions a { padding: 0; border: 0; background: transparent; color: #617dca; font-size: 9px; text-decoration: none; }
+.turn-file-unavailable { color: #9ba6b4; font-size: 9px; white-space: nowrap; }
 .turn-files-deleted { margin: 9px 0 0; color: #a38e91; font-size: 9px; line-height: 1.6; }
 
 .file-preview-modal { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 24px; background: #1f2c3c73; backdrop-filter: blur(3px); }
